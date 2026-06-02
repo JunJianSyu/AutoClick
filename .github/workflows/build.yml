@@ -3,7 +3,7 @@ name: Build AutoClicker
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   build-windows:
@@ -17,8 +17,8 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install PyInstaller
-        run: pip install pyinstaller
+      - name: Install dependencies
+        run: pip install pyautogui pynput pyinstaller
 
       - name: Build EXE
         run: pyinstaller --onefile --noconsole --name AutoClicker auto_clicker.py

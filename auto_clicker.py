@@ -8,18 +8,6 @@ from pynput import keyboard
 
 pyautogui.FAILSAFE = False
 
-KEY_LIST = [
-    "F1", "F2", "F3", "F4", "F5", "F6",
-    "F7", "F8", "F9", "F10", "F11", "F12",
-    "A", "B", "C", "D", "E", "F", "G", "H", "I",
-    "J", "K", "L", "M", "N", "O", "P", "Q", "R",
-    "S", "T", "U", "V", "W", "X", "Y", "Z",
-    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
-    "Enter", "Space", "Tab", "Escape", "Backspace",
-    "Up", "Down", "Left", "Right",
-    "Delete", "Home", "End", "PageUp", "PageDown",
-]
-
 MOUSE_ACTIONS = ["左键单击", "左键双击", "右键单击", "中键单击"]
 
 HOTKEY_START = keyboard.Key.f9
@@ -43,7 +31,7 @@ class AutoClicker:
     def _build_ui(self):
         self.root = tk.Tk()
         self.root.title("自动按键/鼠标点击工具")
-        self.root.geometry("420x560")
+        self.root.geometry("420x420")
         self.root.resizable(False, False)
         self.root.attributes("-topmost", True)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -52,7 +40,7 @@ class AutoClicker:
         main.pack(fill=tk.BOTH, expand=True)
 
         # --- 按键序列列表 ---
-        seq_frame = ttk.LabelFrame(main, text="按键序列", padding=5)
+        seq_frame = ttk.LabelFrame(main, text="按键序列 (每个按键独立循环)", padding=5)
         seq_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
 
         list_inner = ttk.Frame(seq_frame)
@@ -66,45 +54,22 @@ class AutoClicker:
         self.seq_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.seq_listbox.yview)
 
-        # 添加/删除按钮
         seq_btn_frame = ttk.Frame(seq_frame)
         seq_btn_frame.pack(fill=tk.X, pady=(5, 0))
 
-        ttk.Button(seq_btn_frame, text="添加按键", command=self._add_key).pack(
-            side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
-        ttk.Button(seq_btn_frame, text="添加鼠标", command=self._add_mouse).pack(
-            side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        ttk.Button(seq_btn_frame, text="添加延迟", command=self._add_delay).pack(
-            side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        self.add_key_btn = ttk.Button(seq_btn_frame, text="添加按键", command=self._add_key)
+        self.add_key_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+        self.add_mouse_btn = ttk.Button(seq_btn_frame, text="添加鼠标", command=self._add_mouse)
+        self.add_mouse_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         ttk.Button(seq_btn_frame, text="删除选中", command=self._remove_selected).pack(
             side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
 
-        # 上下移动
         move_frame = ttk.Frame(seq_frame)
         move_frame.pack(fill=tk.X, pady=(3, 0))
         ttk.Button(move_frame, text="上移", command=self._move_up).pack(
             side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
         ttk.Button(move_frame, text="下移", command=self._move_down).pack(
             side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
-
-        # --- 循环设置 ---
-        loop_frame = ttk.LabelFrame(main, text="循环设置", padding=5)
-        loop_frame.pack(fill=tk.X, pady=(0, 5))
-
-        row1 = ttk.Frame(loop_frame)
-        row1.pack(fill=tk.X)
-        ttk.Label(row1, text="循环间隔(秒):").pack(side=tk.LEFT)
-        self.interval = tk.DoubleVar(value=1.0)
-        ttk.Spinbox(row1, from_=0.01, to=60.0, increment=0.1,
-                    textvariable=self.interval, width=8, format="%.2f").pack(
-                        side=tk.LEFT, padx=(5, 15))
-
-        ttk.Label(row1, text="循环次数:").pack(side=tk.LEFT)
-        self.loop_count = tk.IntVar(value=0)
-        ttk.Spinbox(row1, from_=0, to=99999, increment=1,
-                    textvariable=self.loop_count, width=8).pack(side=tk.LEFT, padx=(5, 0))
-
-        ttk.Label(loop_frame, text="(循环次数为0表示无限循环)", font=("", 8)).pack(anchor=tk.W)
 
         # --- 控制按钮 ---
         btn_frame = ttk.Frame(main)
@@ -132,32 +97,37 @@ class AutoClicker:
         hint_frame = ttk.LabelFrame(main, text="热键提示", padding=5)
         hint_frame.pack(fill=tk.X)
 
-        tk.Label(hint_frame, text="F9  - 开始/恢复", fg="green", font=("", 9)).pack(anchor=tk.W)
+        tk.Label(hint_frame, text="F9  - 开始/暂停", fg="green", font=("", 9)).pack(anchor=tk.W)
         tk.Label(hint_frame, text="F10 - 停止", fg="red", font=("", 9)).pack(anchor=tk.W)
 
     def _add_key(self):
         dialog = tk.Toplevel(self.root)
         dialog.title("添加按键")
-        dialog.geometry("280x150")
+        dialog.geometry("280x200")
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.attributes("-topmost", True)
 
-        ttk.Label(dialog, text="选择按键:").pack(pady=(10, 0))
+        ttk.Label(dialog, text="输入按键:").pack(pady=(10, 0))
         key_var = tk.StringVar(value="F5")
-        ttk.Combobox(dialog, textvariable=key_var, values=KEY_LIST,
-                      state="readonly", width=15).pack(pady=5)
+        ttk.Entry(dialog, textvariable=key_var, width=18).pack(pady=5)
 
         ttk.Label(dialog, text="按下持续时间(秒, 0为瞬按):").pack()
         dur_var = tk.DoubleVar(value=0.0)
         ttk.Spinbox(dialog, from_=0.0, to=10.0, increment=0.1,
                     textvariable=dur_var, width=8, format="%.2f").pack(pady=2)
 
+        ttk.Label(dialog, text="执行间隔(秒):").pack()
+        interval_var = tk.DoubleVar(value=1.0)
+        ttk.Spinbox(dialog, from_=0.01, to=60.0, increment=0.1,
+                    textvariable=interval_var, width=8, format="%.2f").pack(pady=2)
+
         def confirm():
             self.key_sequence.append({
                 "type": "key",
                 "value": key_var.get(),
                 "duration": dur_var.get(),
+                "interval": interval_var.get(),
             })
             self._refresh_list()
             dialog.destroy()
@@ -167,7 +137,7 @@ class AutoClicker:
     def _add_mouse(self):
         dialog = tk.Toplevel(self.root)
         dialog.title("添加鼠标点击")
-        dialog.geometry("300x220")
+        dialog.geometry("300x270")
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.attributes("-topmost", True)
@@ -208,42 +178,24 @@ class AutoClicker:
         ttk.Button(pos_frame, text="1.5秒后捕获鼠标位置", command=pick_pos).pack(
             anchor=tk.W, padx=(20, 0), pady=(3, 0))
 
+        ttk.Label(dialog, text="执行间隔(秒):").pack()
+        interval_var = tk.DoubleVar(value=1.0)
+        ttk.Spinbox(dialog, from_=0.01, to=60.0, increment=0.1,
+                    textvariable=interval_var, width=8, format="%.2f").pack(pady=2)
+
         def confirm():
-            action = {
+            self.key_sequence.append({
                 "type": "mouse",
                 "value": mouse_var.get(),
                 "use_pos": use_pos.get(),
                 "x": x_var.get(),
                 "y": y_var.get(),
-            }
-            self.key_sequence.append(action)
-            self._refresh_list()
-            dialog.destroy()
-
-        ttk.Button(dialog, text="确定", command=confirm).pack(pady=8)
-
-    def _add_delay(self):
-        dialog = tk.Toplevel(self.root)
-        dialog.title("添加延迟")
-        dialog.geometry("250x100")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.attributes("-topmost", True)
-
-        ttk.Label(dialog, text="延迟时间(秒):").pack(pady=(10, 0))
-        delay_var = tk.DoubleVar(value=0.5)
-        ttk.Spinbox(dialog, from_=0.01, to=60.0, increment=0.1,
-                    textvariable=delay_var, width=8, format="%.2f").pack(pady=5)
-
-        def confirm():
-            self.key_sequence.append({
-                "type": "delay",
-                "value": delay_var.get(),
+                "interval": interval_var.get(),
             })
             self._refresh_list()
             dialog.destroy()
 
-        ttk.Button(dialog, text="确定", command=confirm).pack(pady=5)
+        ttk.Button(dialog, text="确定", command=confirm).pack(pady=8)
 
     def _remove_selected(self):
         selected = self.seq_listbox.curselection()
@@ -277,17 +229,24 @@ class AutoClicker:
         self.seq_listbox.delete(0, tk.END)
         for i, action in enumerate(self.key_sequence, 1):
             t = action["type"]
+            interval = action.get("interval", 1.0)
             if t == "key":
                 dur = action.get("duration", 0)
-                dur_str = f" (持续{dur}秒)" if dur > 0 else ""
-                self.seq_listbox.insert(tk.END, f"{i}. 按键: {action['value']}{dur_str}")
+                dur_str = f" 持续{dur}秒" if dur > 0 else ""
+                self.seq_listbox.insert(tk.END,
+                    f"{i}. 按键: {action['value']}{dur_str} | 间隔{interval}秒")
             elif t == "mouse":
                 pos_str = ""
                 if action.get("use_pos"):
                     pos_str = f" @({action['x']},{action['y']})"
-                self.seq_listbox.insert(tk.END, f"{i}. 鼠标: {action['value']}{pos_str}")
-            elif t == "delay":
-                self.seq_listbox.insert(tk.END, f"{i}. 延迟: {action['value']}秒")
+                self.seq_listbox.insert(tk.END,
+                    f"{i}. 鼠标: {action['value']}{pos_str} | 间隔{interval}秒")
+        self._update_add_buttons()
+
+    def _update_add_buttons(self):
+        state = tk.NORMAL if len(self.key_sequence) < 5 else tk.DISABLED
+        self.add_key_btn.config(state=state)
+        self.add_mouse_btn.config(state=state)
 
     def _simulate_key(self, key_name, duration=0):
         name = key_name.lower()
@@ -318,42 +277,33 @@ class AutoClicker:
             self.root.after(0, lambda: self._set_status("错误: 按键序列为空"))
             return
 
-        interval = self.interval.get()
-        max_loops = self.loop_count.get()
-        loop_num = 0
+        threads = []
+        for action in self.key_sequence:
+            t = threading.Thread(target=self._action_worker,
+                                 args=(action,), daemon=True)
+            threads.append(t)
+            t.start()
+
+        for t in threads:
+            t.join()
+
+    def _action_worker(self, action):
+        interval = action.get("interval", 1.0)
 
         while not self.stop_event.is_set():
-            if max_loops > 0 and loop_num >= max_loops:
-                self.root.after(0, self._stop)
-                self.root.after(0, lambda: self._set_status("完成"))
-                return
-
             self.pause_event.wait()
             if self.stop_event.is_set():
                 break
 
-            for action in self.key_sequence:
-                if self.stop_event.is_set():
-                    return
-                self.pause_event.wait()
-                if self.stop_event.is_set():
-                    break
-
-                try:
-                    t = action["type"]
-                    if t == "key":
-                        self._simulate_key(action["value"], action.get("duration", 0))
-                    elif t == "mouse":
-                        self._simulate_click(action)
-                    elif t == "delay":
-                        self._interruptible_sleep(action["value"])
-                except Exception as e:
-                    self.root.after(0, lambda err=str(e): self._set_status(f"错误: {err}"))
-                    return
-
-            loop_num += 1
-            self.root.after(0, lambda n=loop_num: self._set_status(
-                f"运行中... 已循环 {n} 次"))
+            try:
+                t = action["type"]
+                if t == "key":
+                    self._simulate_key(action["value"], action.get("duration", 0))
+                elif t == "mouse":
+                    self._simulate_click(action)
+            except Exception as e:
+                self.root.after(0, lambda err=str(e): self._set_status(f"错误: {err}"))
+                return
 
             self._interruptible_sleep(interval)
 
@@ -378,7 +328,8 @@ class AutoClicker:
         if self.paused:
             self.paused = False
             self.pause_event.set()
-            self._set_status(f"运行中... (间隔: {self.interval.get()}秒)")
+            self._set_status("运行中...")
+            self.start_btn.config(state=tk.DISABLED)
             self.pause_btn.config(state=tk.NORMAL)
             return
 
@@ -393,7 +344,7 @@ class AutoClicker:
         self.start_btn.config(state=tk.DISABLED)
         self.pause_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.NORMAL)
-        self._set_status(f"运行中... (间隔: {self.interval.get()}秒)")
+        self._set_status("运行中...")
 
         self.worker_thread = threading.Thread(target=self._worker, daemon=True)
         self.worker_thread.start()
@@ -425,7 +376,10 @@ class AutoClicker:
     def _start_hotkey_listener(self):
         def on_press(key):
             if key == HOTKEY_START:
-                self.root.after(0, self._start)
+                if self.running and not self.paused:
+                    self.root.after(0, self._pause)
+                else:
+                    self.root.after(0, self._start)
             elif key == HOTKEY_STOP:
                 self.root.after(0, self._stop)
 

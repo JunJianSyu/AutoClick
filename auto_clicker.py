@@ -10,8 +10,8 @@ pyautogui.FAILSAFE = False
 
 MOUSE_ACTIONS = ["左键单击", "左键双击", "右键单击", "中键单击"]
 
-HOTKEY_START = keyboard.Key.f9
-HOTKEY_STOP = keyboard.Key.f10
+# F1-F12 保留给热键使用，不允许设为动作键
+RESERVED_HOTKEY_NAMES = {f"f{i}" for i in range(1, 13)}
 
 
 class AutoClicker:
@@ -24,6 +24,8 @@ class AutoClicker:
         self.pause_event.set()
 
         self.key_sequence = []
+        self.hotkey_start_var = tk.StringVar(value="F9")
+        self.hotkey_stop_var = tk.StringVar(value="F10")
 
         self._build_ui()
         self._start_hotkey_listener()
@@ -31,7 +33,7 @@ class AutoClicker:
     def _build_ui(self):
         self.root = tk.Tk()
         self.root.title("自动按键/鼠标点击工具")
-        self.root.geometry("420x420")
+        self.root.geometry("420x480")
         self.root.resizable(False, False)
         self.root.attributes("-topmost", True)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -50,16 +52,19 @@ class AutoClicker:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.seq_listbox = tk.Listbox(list_inner, height=8, yscrollcommand=scrollbar.set,
-                                       font=("", 9))
+                                      font=("", 9))
         self.seq_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.seq_listbox.yview)
 
         seq_btn_frame = ttk.Frame(seq_frame)
         seq_btn_frame.pack(fill=tk.X, pady=(5, 0))
 
-        self.add_key_btn = ttk.Button(seq_btn_frame, text="添加按键", command=self._add_key)
-        self.add_key_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
-        self.add_mouse_btn = ttk.Button(seq_btn_frame, text="添加鼠标", command=self._add_mouse)
+        self.add_key_btn = ttk.Button(
+            seq_btn_frame, text="添加按键", command=self._add_key)
+        self.add_key_btn.pack(side=tk.LEFT, expand=True,
+                              fill=tk.X, padx=(0, 2))
+        self.add_mouse_btn = ttk.Button(
+            seq_btn_frame, text="添加鼠标", command=self._add_mouse)
         self.add_mouse_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         ttk.Button(seq_btn_frame, text="删除选中", command=self._remove_selected).pack(
             side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
@@ -79,11 +84,11 @@ class AutoClicker:
         self.start_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
 
         self.pause_btn = ttk.Button(btn_frame, text="暂停", command=self._pause,
-                                     state=tk.DISABLED)
+                                    state=tk.DISABLED)
         self.pause_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
         self.stop_btn = ttk.Button(btn_frame, text="停止", command=self._stop,
-                                    state=tk.DISABLED)
+                                   state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
 
         # --- 状态 ---
@@ -91,14 +96,30 @@ class AutoClicker:
         status_frame.pack(fill=tk.X, pady=(0, 5))
 
         self.status_var = tk.StringVar(value="就绪 - 请添加按键序列")
-        ttk.Label(status_frame, textvariable=self.status_var, font=("", 10, "bold")).pack()
+        ttk.Label(status_frame, textvariable=self.status_var,
+                  font=("", 10, "bold")).pack()
 
-        # --- 热键提示 ---
-        hint_frame = ttk.LabelFrame(main, text="热键提示", padding=5)
-        hint_frame.pack(fill=tk.X)
+        # --- 热键设置 ---
+        hotkey_frame = ttk.LabelFrame(main, text="热键设置 (F1-F12 保留给热键)", padding=5)
+        hotkey_frame.pack(fill=tk.X)
 
-        tk.Label(hint_frame, text="F9  - 开始/暂停", fg="green", font=("", 9)).pack(anchor=tk.W)
-        tk.Label(hint_frame, text="F10 - 停止", fg="red", font=("", 9)).pack(anchor=tk.W)
+        row1 = ttk.Frame(hotkey_frame)
+        row1.pack(fill=tk.X, pady=2)
+        ttk.Label(row1, text="开始/暂停:").pack(side=tk.LEFT)
+        self.start_hk_label = ttk.Label(row1, textvariable=self.hotkey_start_var,
+                                         fg="green", font=("", 9, "bold"), width=8)
+        self.start_hk_label.pack(side=tk.LEFT, padx=(5, 5))
+        ttk.Button(row1, text="修改", width=5,
+                   command=lambda: self._capture_hotkey("start")).pack(side=tk.LEFT)
+
+        row2 = ttk.Frame(hotkey_frame)
+        row2.pack(fill=tk.X, pady=2)
+        ttk.Label(row2, text="停止:").pack(side=tk.LEFT)
+        self.stop_hk_label = ttk.Label(row2, textvariable=self.hotkey_stop_var,
+                                        fg="red", font=("", 9, "bold"), width=8)
+        self.stop_hk_label.pack(side=tk.LEFT, padx=(5, 5))
+        ttk.Button(row2, text="修改", width=5,
+                   command=lambda: self._capture_hotkey("stop")).pack(side=tk.LEFT)
 
     def _add_key(self):
         dialog = tk.Toplevel(self.root)
@@ -108,8 +129,8 @@ class AutoClicker:
         dialog.grab_set()
         dialog.attributes("-topmost", True)
 
-        ttk.Label(dialog, text="输入按键:").pack(pady=(10, 0))
-        key_var = tk.StringVar(value="F5")
+        ttk.Label(dialog, text="输入按键 (F1-F12 不可用):").pack(pady=(10, 0))
+        key_var = tk.StringVar(value="space")
         ttk.Entry(dialog, textvariable=key_var, width=18).pack(pady=5)
 
         ttk.Label(dialog, text="按下持续时间(秒, 0为瞬按):").pack()
@@ -123,9 +144,18 @@ class AutoClicker:
                     textvariable=interval_var, width=8, format="%.2f").pack(pady=2)
 
         def confirm():
+            key_name = key_var.get().strip()
+            if not key_name:
+                messagebox.showwarning("提示", "请输入按键名称", parent=dialog)
+                return
+            if key_name.lower() in RESERVED_HOTKEY_NAMES:
+                messagebox.showwarning("提示",
+                                        "F1-F12 保留给热键使用，不可作为动作按键",
+                                        parent=dialog)
+                return
             self.key_sequence.append({
                 "type": "key",
-                "value": key_var.get(),
+                "value": key_name,
                 "duration": dur_var.get(),
                 "interval": interval_var.get(),
             })
@@ -145,13 +175,14 @@ class AutoClicker:
         ttk.Label(dialog, text="鼠标操作:").pack(pady=(10, 0))
         mouse_var = tk.StringVar(value="左键单击")
         ttk.Combobox(dialog, textvariable=mouse_var, values=MOUSE_ACTIONS,
-                      state="readonly", width=15).pack(pady=5)
+                     state="readonly", width=15).pack(pady=5)
 
         pos_frame = ttk.Frame(dialog)
         pos_frame.pack(pady=5)
 
         use_pos = tk.BooleanVar(value=False)
-        ttk.Checkbutton(pos_frame, text="指定坐标", variable=use_pos).pack(anchor=tk.W)
+        ttk.Checkbutton(pos_frame, text="指定坐标",
+                        variable=use_pos).pack(anchor=tk.W)
 
         coord_frame = ttk.Frame(pos_frame)
         coord_frame.pack(anchor=tk.W, padx=(20, 0))
@@ -234,13 +265,13 @@ class AutoClicker:
                 dur = action.get("duration", 0)
                 dur_str = f" 持续{dur}秒" if dur > 0 else ""
                 self.seq_listbox.insert(tk.END,
-                    f"{i}. 按键: {action['value']}{dur_str} | 间隔{interval}秒")
+                                        f"{i}. 按键: {action['value']}{dur_str} | 间隔{interval}秒")
             elif t == "mouse":
                 pos_str = ""
                 if action.get("use_pos"):
                     pos_str = f" @({action['x']},{action['y']})"
                 self.seq_listbox.insert(tk.END,
-                    f"{i}. 鼠标: {action['value']}{pos_str} | 间隔{interval}秒")
+                                        f"{i}. 鼠标: {action['value']}{pos_str} | 间隔{interval}秒")
         self._update_add_buttons()
 
     def _update_add_buttons(self):
@@ -295,17 +326,23 @@ class AutoClicker:
             if self.stop_event.is_set():
                 break
 
+            start_time = time.monotonic()
             try:
                 t = action["type"]
                 if t == "key":
-                    self._simulate_key(action["value"], action.get("duration", 0))
+                    self._simulate_key(
+                        action["value"], action.get("duration", 0))
                 elif t == "mouse":
                     self._simulate_click(action)
             except Exception as e:
-                self.root.after(0, lambda err=str(e): self._set_status(f"错误: {err}"))
+                self.root.after(0, lambda err=str(
+                    e): self._set_status(f"错误: {err}"))
                 return
 
-            self._interruptible_sleep(interval)
+            # 间隔 = 两次执行之间的总时间，扣除本次执行耗时
+            elapsed = time.monotonic() - start_time
+            remaining = max(0, interval - elapsed)
+            self._interruptible_sleep(remaining)
 
     def _interruptible_sleep(self, duration):
         elapsed = 0.0
@@ -373,14 +410,92 @@ class AutoClicker:
 
     # --- 全局热键 (pynput) ---
 
+    @staticmethod
+    def _is_valid_hotkey(name):
+        """检查是否为合法热键名：F13-F24 或单字符"""
+        name = name.strip().upper()
+        if name.startswith("F"):
+            try:
+                n = int(name[1:])
+                return 13 <= n <= 24
+            except ValueError:
+                return False
+        return len(name) == 1
+
+    @staticmethod
+    def _parse_hotkey(name):
+        """将热键名解析为 pynput Key 对象"""
+        name = name.strip().upper()
+        if name.startswith("F"):
+            try:
+                n = int(name[1:])
+                return getattr(keyboard.Key, f"f{n}")
+            except (ValueError, AttributeError):
+                return None
+        if len(name) == 1:
+            return keyboard.KeyCode.from_char(name.lower())
+        return None
+
+    def _capture_hotkey(self, which):
+        """弹出对话框捕获新热键"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("设置热键")
+        dialog.geometry("260x120")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.attributes("-topmost", True)
+
+        ttk.Label(dialog, text="请按下要设置的热键\n(支持 F1-F24 或单个字符键)",
+                  font=("", 10)).pack(pady=10)
+        result_var = tk.StringVar(value="等待按键...")
+        ttk.Label(dialog, textvariable=result_var,
+                  font=("", 12, "bold"), fg="blue").pack()
+
+        captured = [None]
+
+        def on_key_press(key):
+            if hasattr(key, 'name'):
+                key_name = key.name.upper()
+                if key_name in (f"F{i}" for i in range(1, 25)):
+                    result_var.set(key_name)
+                    captured[0] = key_name
+                    dialog.after(300, dialog.destroy)
+                    return
+            if hasattr(key, 'char') and key.char:
+                result_var.set(key.char.upper())
+                captured[0] = key.char.upper()
+                dialog.after(300, dialog.destroy)
+
+        temp_listener = keyboard.Listener(on_press=on_key_press)
+        temp_listener.start()
+
+        dialog.wait_window()
+        temp_listener.stop()
+
+        if captured[0]:
+            if which == "start":
+                self.hotkey_start_var.set(captured[0])
+            else:
+                self.hotkey_stop_var.set(captured[0])
+            self._restart_hotkey_listener()
+
+    def _restart_hotkey_listener(self):
+        """重启热键监听器以应用新的热键配置"""
+        if hasattr(self, "hotkey_listener"):
+            self.hotkey_listener.stop()
+        self._start_hotkey_listener()
+
     def _start_hotkey_listener(self):
+        start_key = self._parse_hotkey(self.hotkey_start_var.get())
+        stop_key = self._parse_hotkey(self.hotkey_stop_var.get())
+
         def on_press(key):
-            if key == HOTKEY_START:
+            if start_key and key == start_key:
                 if self.running and not self.paused:
                     self.root.after(0, self._pause)
                 else:
                     self.root.after(0, self._start)
-            elif key == HOTKEY_STOP:
+            elif stop_key and key == stop_key:
                 self.root.after(0, self._stop)
 
         self.hotkey_listener = keyboard.Listener(on_press=on_press)

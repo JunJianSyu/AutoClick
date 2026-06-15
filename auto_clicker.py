@@ -99,8 +99,8 @@ class AutoClicker:
         status_frame.pack(fill=tk.X, pady=(0, 5))
 
         self.status_var = tk.StringVar(value="就绪 - 请添加按键序列")
-        ttk.Label(status_frame, textvariable=self.status_var,
-                  font=("", 10, "bold")).pack()
+        tk.Label(status_frame, textvariable=self.status_var,
+                 font=("", 10, "bold")).pack()
 
         # --- 热键设置 ---
         hotkey_frame = ttk.LabelFrame(main, text="热键设置 (F1-F12 保留给热键)", padding=5)
@@ -109,8 +109,8 @@ class AutoClicker:
         row1 = ttk.Frame(hotkey_frame)
         row1.pack(fill=tk.X, pady=2)
         ttk.Label(row1, text="开始/暂停:").pack(side=tk.LEFT)
-        self.start_hk_label = ttk.Label(row1, textvariable=self.hotkey_start_var,
-                                         fg="green", font=("", 9, "bold"), width=8)
+        self.start_hk_label = tk.Label(row1, textvariable=self.hotkey_start_var,
+                                        fg="green", font=("", 9, "bold"), width=8)
         self.start_hk_label.pack(side=tk.LEFT, padx=(5, 5))
         ttk.Button(row1, text="修改", width=5,
                    command=lambda: self._capture_hotkey("start")).pack(side=tk.LEFT)
@@ -118,8 +118,8 @@ class AutoClicker:
         row2 = ttk.Frame(hotkey_frame)
         row2.pack(fill=tk.X, pady=2)
         ttk.Label(row2, text="停止:").pack(side=tk.LEFT)
-        self.stop_hk_label = ttk.Label(row2, textvariable=self.hotkey_stop_var,
-                                        fg="red", font=("", 9, "bold"), width=8)
+        self.stop_hk_label = tk.Label(row2, textvariable=self.hotkey_stop_var,
+                                       fg="red", font=("", 9, "bold"), width=8)
         self.stop_hk_label.pack(side=tk.LEFT, padx=(5, 5))
         ttk.Button(row2, text="修改", width=5,
                    command=lambda: self._capture_hotkey("stop")).pack(side=tk.LEFT)
@@ -515,11 +515,11 @@ class AutoClicker:
         dialog.grab_set()
         dialog.attributes("-topmost", True)
 
-        ttk.Label(dialog, text="请按下要设置的热键\n(支持 F1-F24 或单个字符键)",
-                  font=("", 10)).pack(pady=10)
+        tk.Label(dialog, text="请按下要设置的热键\n(支持 F1-F24 或单个字符键)",
+                 font=("", 10)).pack(pady=10)
         result_var = tk.StringVar(value="等待按键...")
-        ttk.Label(dialog, textvariable=result_var,
-                  font=("", 12, "bold"), fg="blue").pack()
+        tk.Label(dialog, textvariable=result_var,
+                 font=("", 12, "bold"), fg="blue").pack()
 
         captured = [None]
 

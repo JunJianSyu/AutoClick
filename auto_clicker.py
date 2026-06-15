@@ -24,8 +24,6 @@ class AutoClicker:
         self.pause_event.set()
 
         self.key_sequence = []
-        self.hotkey_start_var = tk.StringVar(value="F9")
-        self.hotkey_stop_var = tk.StringVar(value="F10")
         self.floating_indicator = None
 
         self._build_ui()
@@ -33,6 +31,8 @@ class AutoClicker:
 
     def _build_ui(self):
         self.root = tk.Tk()
+        self.hotkey_start_var = tk.StringVar(value="F9")
+        self.hotkey_stop_var = tk.StringVar(value="F10")
         self.root.title("自动按键/鼠标点击工具")
         self.root.geometry("420x480")
         self.root.resizable(False, False)

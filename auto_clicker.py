@@ -1,3 +1,6 @@
+import json
+import os
+import sys
 import threading
 import time
 import tkinter as tk
@@ -27,6 +30,8 @@ class AutoClicker:
         self.floating_indicator = None
 
         self._build_ui()
+        self._load_config()
+        self._refresh_list()
         self._start_hotkey_listener()
 
     def _build_ui(self):
@@ -93,6 +98,9 @@ class AutoClicker:
         self.stop_btn = ttk.Button(btn_frame, text="停止", command=self._stop,
                                    state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+
+        ttk.Button(main, text="清空配置", command=self._clear_config).pack(
+            fill=tk.X, pady=(0, 5))
 
         # --- 状态 ---
         status_frame = ttk.LabelFrame(main, text="状态", padding=5)
@@ -276,11 +284,72 @@ class AutoClicker:
                 self.seq_listbox.insert(tk.END,
                                         f"{i}. 鼠标: {action['value']}{pos_str} | 间隔{interval}秒")
         self._update_add_buttons()
+        self._save_config()
 
     def _update_add_buttons(self):
-        state = tk.NORMAL if len(self.key_sequence) < 5 else tk.DISABLED
+        state = tk.NORMAL if len(self.key_sequence) < 10 else tk.DISABLED
         self.add_key_btn.config(state=state)
         self.add_mouse_btn.config(state=state)
+
+    # --- 配置持久化 ---
+
+    @staticmethod
+    def _get_config_path():
+        """获取配置文件路径（与 exe/脚本同目录）"""
+        if getattr(sys, 'frozen', False):
+            base_dir = os.path.dirname(sys.executable)
+        else:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(base_dir, "auto_clicker_config.json")
+
+    def _load_config(self):
+        """从配置文件加载设置"""
+        config_path = self._get_config_path()
+        if not os.path.exists(config_path):
+            return
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return
+
+        # 恢复按键序列
+        if "key_sequence" in config:
+            self.key_sequence = config["key_sequence"]
+
+        # 恢复热键设置
+        if "hotkey_start" in config:
+            self.hotkey_start_var.set(config["hotkey_start"])
+        if "hotkey_stop" in config:
+            self.hotkey_stop_var.set(config["hotkey_stop"])
+
+    def _save_config(self):
+        """将当前设置保存到配置文件"""
+        config = {
+            "key_sequence": self.key_sequence,
+            "hotkey_start": self.hotkey_start_var.get(),
+            "hotkey_stop": self.hotkey_stop_var.get(),
+        }
+        try:
+            config_path = self._get_config_path()
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+        except IOError:
+            pass
+
+    def _clear_config(self):
+        """清空所有配置，恢复默认设置"""
+        if self.running:
+            messagebox.showwarning("提示", "请先停止运行再清空配置")
+            return
+        if not messagebox.askyesno("确认", "确定清空所有按键和热键配置？\n将恢复默认值(F9/F10)"):
+            return
+        self.key_sequence = []
+        self.hotkey_start_var.set("F9")
+        self.hotkey_stop_var.set("F10")
+        self._refresh_list()
+        self._restart_hotkey_listener()
+        self._set_status("配置已清空")
 
     def _simulate_key(self, key_name, duration=0):
         name = key_name.lower()
@@ -481,18 +550,6 @@ class AutoClicker:
     # --- 全局热键 (pynput) ---
 
     @staticmethod
-    def _is_valid_hotkey(name):
-        """检查是否为合法热键名：F13-F24 或单字符"""
-        name = name.strip().upper()
-        if name.startswith("F"):
-            try:
-                n = int(name[1:])
-                return 13 <= n <= 24
-            except ValueError:
-                return False
-        return len(name) == 1
-
-    @staticmethod
     def _parse_hotkey(name):
         """将热键名解析为 pynput Key 对象"""
         name = name.strip().upper()
@@ -527,13 +584,13 @@ class AutoClicker:
             if hasattr(key, 'name'):
                 key_name = key.name.upper()
                 if key_name in (f"F{i}" for i in range(1, 25)):
-                    result_var.set(key_name)
                     captured[0] = key_name
+                    dialog.after(0, lambda: result_var.set(key_name))
                     dialog.after(300, dialog.destroy)
                     return
             if hasattr(key, 'char') and key.char:
-                result_var.set(key.char.upper())
                 captured[0] = key.char.upper()
+                dialog.after(0, lambda: result_var.set(key.char.upper()))
                 dialog.after(300, dialog.destroy)
 
         temp_listener = keyboard.Listener(on_press=on_key_press)
@@ -548,6 +605,7 @@ class AutoClicker:
             else:
                 self.hotkey_stop_var.set(captured[0])
             self._restart_hotkey_listener()
+            self._save_config()
 
     def _restart_hotkey_listener(self):
         """重启热键监听器以应用新的热键配置"""
@@ -576,6 +634,7 @@ class AutoClicker:
         self.stop_event.set()
         self.pause_event.set()
         self._hide_indicator()
+        self._save_config()
         if hasattr(self, "hotkey_listener"):
             self.hotkey_listener.stop()
         self.root.destroy()

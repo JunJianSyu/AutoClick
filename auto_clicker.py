@@ -26,6 +26,7 @@ class AutoClicker:
         self.key_sequence = []
         self.hotkey_start_var = tk.StringVar(value="F9")
         self.hotkey_stop_var = tk.StringVar(value="F10")
+        self.floating_indicator = None
 
         self._build_ui()
         self._start_hotkey_listener()
@@ -37,6 +38,8 @@ class AutoClicker:
         self.root.resizable(False, False)
         self.root.attributes("-topmost", True)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.bind("<Unmap>", self._on_window_unmap)
+        self.root.bind("<Map>", self._on_window_map)
 
         main = ttk.Frame(self.root, padding=10)
         main.pack(fill=tk.BOTH, expand=True)
@@ -357,6 +360,59 @@ class AutoClicker:
     def _set_status(self, text):
         self.status_var.set(text)
 
+    # --- 最小化浮动指示器 ---
+
+    def _on_window_unmap(self, event):
+        """主窗口最小化时触发"""
+        if event.widget is self.root and self.running:
+            self._show_indicator()
+
+    def _on_window_map(self, event):
+        """主窗口恢复时触发"""
+        if event.widget is self.root:
+            self._hide_indicator()
+
+    def _show_indicator(self):
+        """显示左上角浮动运行指示器"""
+        if self.floating_indicator and self.floating_indicator.winfo_exists():
+            return
+        self.floating_indicator = tk.Toplevel(self.root)
+        self.floating_indicator.overrideredirect(True)
+        self.floating_indicator.attributes("-topmost", True)
+        self.floating_indicator.geometry("+10+10")
+
+        frame = tk.Frame(self.floating_indicator, bg="#2b2b2b",
+                         highlightbackground="#555555", highlightthickness=1)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        dot = tk.Label(frame, text="\u25cf", fg="#4CAF50" if not self.paused else "#FF9800",
+                       bg="#2b2b2b", font=("", 10))
+        dot.pack(side=tk.LEFT, padx=(6, 2))
+
+        self.indicator_text = tk.StringVar(
+            value="运行中" if not self.paused else "已暂停")
+        label = tk.Label(frame, textvariable=self.indicator_text,
+                         fg="#ffffff", bg="#2b2b2b",
+                         font=("", 10, "bold"), cursor="hand2")
+        label.pack(side=tk.LEFT, padx=(0, 6), pady=3)
+
+        # 点击指示器恢复主窗口
+        for widget in (frame, label, dot):
+            widget.bind("<Button-1>", self._restore_from_indicator)
+
+    def _hide_indicator(self):
+        """销毁浮动指示器"""
+        if self.floating_indicator and self.floating_indicator.winfo_exists():
+            self.floating_indicator.destroy()
+        self.floating_indicator = None
+
+    def _restore_from_indicator(self, event=None):
+        """点击指示器恢复主窗口"""
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+        self._hide_indicator()
+
     def _start(self):
         if not self.key_sequence:
             messagebox.showwarning("提示", "请先添加按键序列")
@@ -368,6 +424,10 @@ class AutoClicker:
             self._set_status("运行中...")
             self.start_btn.config(state=tk.DISABLED)
             self.pause_btn.config(state=tk.NORMAL)
+            # 如果最小化中，更新指示器
+            if self.root.state() == "iconic" and self.floating_indicator \
+                    and self.floating_indicator.winfo_exists():
+                self.indicator_text.set("运行中")
             return
 
         if self.running:
@@ -386,6 +446,10 @@ class AutoClicker:
         self.worker_thread = threading.Thread(target=self._worker, daemon=True)
         self.worker_thread.start()
 
+        # 如果启动时已最小化，显示指示器
+        if self.root.state() == "iconic":
+            self._show_indicator()
+
     def _pause(self):
         if not self.running or self.paused:
             return
@@ -394,6 +458,11 @@ class AutoClicker:
         self._set_status("已暂停")
         self.start_btn.config(state=tk.NORMAL)
         self.pause_btn.config(state=tk.DISABLED)
+        # 更新浮动指示器
+        if self.floating_indicator and self.floating_indicator.winfo_exists():
+            self.indicator_text.set("已暂停")
+        elif self.root.state() == "iconic":
+            self._show_indicator()
 
     def _stop(self):
         if not self.running:
@@ -407,6 +476,7 @@ class AutoClicker:
         self.pause_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.DISABLED)
         self._set_status("已停止")
+        self._hide_indicator()
 
     # --- 全局热键 (pynput) ---
 
@@ -505,6 +575,7 @@ class AutoClicker:
     def _on_close(self):
         self.stop_event.set()
         self.pause_event.set()
+        self._hide_indicator()
         if hasattr(self, "hotkey_listener"):
             self.hotkey_listener.stop()
         self.root.destroy()

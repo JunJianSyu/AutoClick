@@ -74,6 +74,9 @@ class AutoClicker:
         self.add_mouse_btn = ttk.Button(
             seq_btn_frame, text="添加鼠标", command=self._add_mouse)
         self.add_mouse_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        self.edit_btn = ttk.Button(
+            seq_btn_frame, text="编辑选中", command=self._edit_selected)
+        self.edit_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         ttk.Button(seq_btn_frame, text="删除选中", command=self._remove_selected).pack(
             side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
 
@@ -235,6 +238,127 @@ class AutoClicker:
                 "interval": interval_var.get(),
             })
             self._refresh_list()
+            dialog.destroy()
+
+        ttk.Button(dialog, text="确定", command=confirm).pack(pady=8)
+
+    def _edit_selected(self):
+        selected = self.seq_listbox.curselection()
+        if not selected:
+            messagebox.showinfo("提示", "请先选中要编辑的条目")
+            return
+        idx = selected[0]
+        action = self.key_sequence[idx]
+        if action["type"] == "key":
+            self._edit_key(idx, action)
+        elif action["type"] == "mouse":
+            self._edit_mouse(idx, action)
+
+    def _edit_key(self, idx, action):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("编辑按键")
+        dialog.geometry("280x200")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.attributes("-topmost", True)
+
+        ttk.Label(dialog, text="输入按键 (F1-F12 不可用):").pack(pady=(10, 0))
+        key_var = tk.StringVar(value=action["value"])
+        ttk.Entry(dialog, textvariable=key_var, width=18).pack(pady=5)
+
+        ttk.Label(dialog, text="按下持续时间(秒, 0为瞬按):").pack()
+        dur_var = tk.DoubleVar(value=action.get("duration", 0))
+        ttk.Spinbox(dialog, from_=0.0, to=10.0, increment=0.1,
+                    textvariable=dur_var, width=8, format="%.2f").pack(pady=2)
+
+        ttk.Label(dialog, text="执行间隔(秒):").pack()
+        interval_var = tk.DoubleVar(value=action.get("interval", 1.0))
+        ttk.Spinbox(dialog, from_=0.01, to=60.0, increment=0.1,
+                    textvariable=interval_var, width=8, format="%.2f").pack(pady=2)
+
+        def confirm():
+            key_name = key_var.get().strip()
+            if not key_name:
+                messagebox.showwarning("提示", "请输入按键名称", parent=dialog)
+                return
+            if key_name.lower() in RESERVED_HOTKEY_NAMES:
+                messagebox.showwarning("提示",
+                                        "F1-F12 保留给热键使用，不可作为动作按键",
+                                        parent=dialog)
+                return
+            self.key_sequence[idx] = {
+                "type": "key",
+                "value": key_name,
+                "duration": dur_var.get(),
+                "interval": interval_var.get(),
+            }
+            self._refresh_list()
+            self.seq_listbox.selection_set(idx)
+            dialog.destroy()
+
+        ttk.Button(dialog, text="确定", command=confirm).pack(pady=8)
+
+    def _edit_mouse(self, idx, action):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("编辑鼠标点击")
+        dialog.geometry("300x270")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.attributes("-topmost", True)
+
+        ttk.Label(dialog, text="鼠标操作:").pack(pady=(10, 0))
+        mouse_var = tk.StringVar(value=action["value"])
+        ttk.Combobox(dialog, textvariable=mouse_var, values=MOUSE_ACTIONS,
+                     state="readonly", width=15).pack(pady=5)
+
+        pos_frame = ttk.Frame(dialog)
+        pos_frame.pack(pady=5)
+
+        use_pos = tk.BooleanVar(value=action.get("use_pos", False))
+        ttk.Checkbutton(pos_frame, text="指定坐标",
+                        variable=use_pos).pack(anchor=tk.W)
+
+        coord_frame = ttk.Frame(pos_frame)
+        coord_frame.pack(anchor=tk.W, padx=(20, 0))
+        ttk.Label(coord_frame, text="X:").pack(side=tk.LEFT)
+        x_var = tk.IntVar(value=action.get("x", 0))
+        ttk.Spinbox(coord_frame, from_=0, to=9999, textvariable=x_var, width=6).pack(
+            side=tk.LEFT, padx=(2, 10))
+        ttk.Label(coord_frame, text="Y:").pack(side=tk.LEFT)
+        y_var = tk.IntVar(value=action.get("y", 0))
+        ttk.Spinbox(coord_frame, from_=0, to=9999, textvariable=y_var, width=6).pack(
+            side=tk.LEFT, padx=2)
+
+        def pick_pos():
+            dialog.withdraw()
+            self.root.after(1500, lambda: _capture_pos())
+
+        def _capture_pos():
+            x, y = pyautogui.position()
+            x_var.set(x)
+            y_var.set(y)
+            use_pos.set(True)
+            dialog.deiconify()
+
+        ttk.Button(pos_frame, text="1.5秒后捕获鼠标位置", command=pick_pos).pack(
+            anchor=tk.W, padx=(20, 0), pady=(3, 0))
+
+        ttk.Label(dialog, text="执行间隔(秒):").pack()
+        interval_var = tk.DoubleVar(value=action.get("interval", 1.0))
+        ttk.Spinbox(dialog, from_=0.01, to=60.0, increment=0.1,
+                    textvariable=interval_var, width=8, format="%.2f").pack(pady=2)
+
+        def confirm():
+            self.key_sequence[idx] = {
+                "type": "mouse",
+                "value": mouse_var.get(),
+                "use_pos": use_pos.get(),
+                "x": x_var.get(),
+                "y": y_var.get(),
+                "interval": interval_var.get(),
+            }
+            self._refresh_list()
+            self.seq_listbox.selection_set(idx)
             dialog.destroy()
 
         ttk.Button(dialog, text="确定", command=confirm).pack(pady=8)
@@ -454,20 +578,28 @@ class AutoClicker:
                          highlightbackground="#555555", highlightthickness=1)
         frame.pack(fill=tk.BOTH, expand=True)
 
-        dot = tk.Label(frame, text="\u25cf", fg="#4CAF50" if not self.paused else "#FF9800",
-                       bg="#2b2b2b", font=("", 10))
-        dot.pack(side=tk.LEFT, padx=(6, 2))
+        self.indicator_dot = tk.Label(frame, text="\u25cf", fg="#4CAF50",
+                                      bg="#2b2b2b", font=("", 10))
+        self.indicator_dot.pack(side=tk.LEFT, padx=(6, 2))
 
-        self.indicator_text = tk.StringVar(
-            value="运行中" if not self.paused else "已暂停")
+        self.indicator_text = tk.StringVar(value="运行中")
         label = tk.Label(frame, textvariable=self.indicator_text,
                          fg="#ffffff", bg="#2b2b2b",
                          font=("", 10, "bold"), cursor="hand2")
         label.pack(side=tk.LEFT, padx=(0, 6), pady=3)
 
         # 点击指示器恢复主窗口
-        for widget in (frame, label, dot):
+        for widget in (frame, label, self.indicator_dot):
             widget.bind("<Button-1>", self._restore_from_indicator)
+
+    def _update_indicator(self, state):
+        """更新浮动指示器的文字和圆点颜色"""
+        if not self.floating_indicator or not self.floating_indicator.winfo_exists():
+            return
+        colors = {"running": "#4CAF50", "paused": "#FF9800", "stopped": "#F44336"}
+        texts = {"running": "运行中", "paused": "已暂停", "stopped": "已停止"}
+        self.indicator_dot.config(fg=colors.get(state, "#4CAF50"))
+        self.indicator_text.set(texts.get(state, "就绪"))
 
     def _hide_indicator(self):
         """销毁浮动指示器"""
@@ -494,9 +626,8 @@ class AutoClicker:
             self.start_btn.config(state=tk.DISABLED)
             self.pause_btn.config(state=tk.NORMAL)
             # 如果最小化中，更新指示器
-            if self.root.state() == "iconic" and self.floating_indicator \
-                    and self.floating_indicator.winfo_exists():
-                self.indicator_text.set("运行中")
+            if self.root.state() == "iconic":
+                self._update_indicator("running")
             return
 
         if self.running:
@@ -529,9 +660,10 @@ class AutoClicker:
         self.pause_btn.config(state=tk.DISABLED)
         # 更新浮动指示器
         if self.floating_indicator and self.floating_indicator.winfo_exists():
-            self.indicator_text.set("已暂停")
+            self._update_indicator("paused")
         elif self.root.state() == "iconic":
             self._show_indicator()
+            self._update_indicator("paused")
 
     def _stop(self):
         if not self.running:
@@ -545,7 +677,13 @@ class AutoClicker:
         self.pause_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.DISABLED)
         self._set_status("已停止")
-        self._hide_indicator()
+        # 如果最小化中，更新指示器为红色(已停止)
+        if self.root.state() == "iconic":
+            if self.floating_indicator and self.floating_indicator.winfo_exists():
+                self._update_indicator("stopped")
+            else:
+                self._show_indicator()
+                self._update_indicator("stopped")
 
     # --- 全局热键 (pynput) ---
 

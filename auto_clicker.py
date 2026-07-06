@@ -7,7 +7,9 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 import pyautogui
+from PIL import Image, ImageDraw, ImageFont
 from pynput import keyboard
+import pystray
 
 pyautogui.FAILSAFE = False
 
@@ -15,6 +17,87 @@ MOUSE_ACTIONS = ["左键单击", "左键双击", "右键单击", "中键单击"]
 
 # F1-F12 保留给热键使用，不允许设为动作键
 RESERVED_HOTKEY_NAMES = {f"f{i}" for i in range(1, 13)}
+
+
+def _create_tray_icon_image(color="#4CAF50"):
+    """创建托盘图标图片：彩色圆角方块 + 字母 A"""
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle([4, 4, 59, 59], radius=12, fill=color)
+    try:
+        font = ImageFont.truetype("arial.ttf", 32)
+    except Exception:
+        font = ImageFont.load_default()
+    bbox = draw.textbbox((0, 0), "A", font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    x = (64 - tw) // 2 - bbox[0]
+    y = (64 - th) // 2 - bbox[1]
+    draw.text((x, y), "A", fill="white", font=font)
+    return img
+
+
+class _TrayManager:
+    """系统托盘管理器"""
+
+    STATUS_COLORS = {
+        "running": "#4CAF50",
+        "paused": "#FF9800",
+        "stopped": "#9E9E9E",
+        "ready": "#4CAF50",
+    }
+    STATUS_TITLES = {
+        "running": "AutoClicker - 运行中",
+        "paused": "AutoClicker - 已暂停",
+        "stopped": "AutoClicker - 已停止",
+        "ready": "AutoClicker",
+    }
+
+    def __init__(self, app: AutoClicker):
+        self._app = app
+        self._icon = pystray.Icon(
+            "auto_clicker",
+            icon=_create_tray_icon_image(),
+            title="AutoClicker",
+            menu=pystray.Menu(
+                pystray.MenuItem("显示窗口", self._on_show, default=True),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("清空配置", self._on_clear),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("退出", self._on_quit),
+            ),
+        )
+
+    def _on_show(self, icon=None, item=None):
+        """显示主窗口"""
+        self._app.root.after(0, self._app._show_window)
+
+    def _on_quit(self, icon=None, item=None):
+        """完全退出程序"""
+        self._icon.stop()
+        self._app.root.after(0, self._app._quit)
+
+    def _on_clear(self, icon=None, item=None):
+        """清空配置"""
+        self._app.root.after(0, self._app._clear_config)
+
+    def start(self):
+        """在后台线程启动托盘图标"""
+        thread = threading.Thread(target=self._icon.run, daemon=True)
+        thread.start()
+
+    def update_status(self, status: str):
+        """更新托盘图标颜色和悬停提示"""
+        color = self.STATUS_COLORS.get(status, "#4CAF50")
+        title = self.STATUS_TITLES.get(status, "AutoClicker")
+        try:
+            self._icon.icon = _create_tray_icon_image(color)
+            self._icon.title = title
+        except Exception:
+            pass
+
+    def stop(self):
+        """停止托盘图标"""
+        self._icon.stop()
 
 
 class AutoClicker:
@@ -27,12 +110,17 @@ class AutoClicker:
         self.pause_event.set()
 
         self.key_sequence = []
-        self.floating_indicator = None
 
         self._build_ui()
         self._load_config()
         self._refresh_list()
         self._start_hotkey_listener()
+
+        self.tray = _TrayManager(self)
+        self.tray.start()
+
+        # 启动后自动最小化到托盘
+        self.root.withdraw()
 
     def _build_ui(self):
         self.root = tk.Tk()
@@ -553,66 +641,25 @@ class AutoClicker:
     def _set_status(self, text):
         self.status_var.set(text)
 
-    # --- 最小化浮动指示器 ---
+    # --- 窗口显示/隐藏（托盘） ---
 
     def _on_window_unmap(self, event):
         """主窗口最小化时触发"""
-        if event.widget is self.root and self.running:
-            self._show_indicator()
+        pass
 
     def _on_window_map(self, event):
         """主窗口恢复时触发"""
-        if event.widget is self.root:
-            self._hide_indicator()
+        pass
 
-    def _show_indicator(self):
-        """显示左上角浮动运行指示器"""
-        if self.floating_indicator and self.floating_indicator.winfo_exists():
-            return
-        self.floating_indicator = tk.Toplevel(self.root)
-        self.floating_indicator.overrideredirect(True)
-        self.floating_indicator.attributes("-topmost", True)
-        self.floating_indicator.geometry("+10+10")
-
-        frame = tk.Frame(self.floating_indicator, bg="#2b2b2b",
-                         highlightbackground="#555555", highlightthickness=1)
-        frame.pack(fill=tk.BOTH, expand=True)
-
-        self.indicator_dot = tk.Label(frame, text="\u25cf", fg="#4CAF50",
-                                      bg="#2b2b2b", font=("", 10))
-        self.indicator_dot.pack(side=tk.LEFT, padx=(6, 2))
-
-        self.indicator_text = tk.StringVar(value="运行中")
-        label = tk.Label(frame, textvariable=self.indicator_text,
-                         fg="#ffffff", bg="#2b2b2b",
-                         font=("", 10, "bold"), cursor="hand2")
-        label.pack(side=tk.LEFT, padx=(0, 6), pady=3)
-
-        # 点击指示器恢复主窗口
-        for widget in (frame, label, self.indicator_dot):
-            widget.bind("<Button-1>", self._restore_from_indicator)
-
-    def _update_indicator(self, state):
-        """更新浮动指示器的文字和圆点颜色"""
-        if not self.floating_indicator or not self.floating_indicator.winfo_exists():
-            return
-        colors = {"running": "#4CAF50", "paused": "#FF9800", "stopped": "#F44336"}
-        texts = {"running": "运行中", "paused": "已暂停", "stopped": "已停止"}
-        self.indicator_dot.config(fg=colors.get(state, "#4CAF50"))
-        self.indicator_text.set(texts.get(state, "就绪"))
-
-    def _hide_indicator(self):
-        """销毁浮动指示器"""
-        if self.floating_indicator and self.floating_indicator.winfo_exists():
-            self.floating_indicator.destroy()
-        self.floating_indicator = None
-
-    def _restore_from_indicator(self, event=None):
-        """点击指示器恢复主窗口"""
+    def _show_window(self):
+        """从托盘恢复主窗口"""
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
-        self._hide_indicator()
+
+    def _hide_window(self):
+        """隐藏主窗口到托盘"""
+        self.root.withdraw()
 
     def _start(self):
         if not self.key_sequence:
@@ -625,9 +672,7 @@ class AutoClicker:
             self._set_status("运行中...")
             self.start_btn.config(state=tk.DISABLED)
             self.pause_btn.config(state=tk.NORMAL)
-            # 如果最小化中，更新指示器
-            if self.root.state() == "iconic":
-                self._update_indicator("running")
+            self.tray.update_status("running")
             return
 
         if self.running:
@@ -646,9 +691,7 @@ class AutoClicker:
         self.worker_thread = threading.Thread(target=self._worker, daemon=True)
         self.worker_thread.start()
 
-        # 如果启动时已最小化，显示指示器
-        if self.root.state() == "iconic":
-            self._show_indicator()
+        self.tray.update_status("running")
 
     def _pause(self):
         if not self.running or self.paused:
@@ -658,12 +701,7 @@ class AutoClicker:
         self._set_status("已暂停")
         self.start_btn.config(state=tk.NORMAL)
         self.pause_btn.config(state=tk.DISABLED)
-        # 更新浮动指示器
-        if self.floating_indicator and self.floating_indicator.winfo_exists():
-            self._update_indicator("paused")
-        elif self.root.state() == "iconic":
-            self._show_indicator()
-            self._update_indicator("paused")
+        self.tray.update_status("paused")
 
     def _stop(self):
         if not self.running:
@@ -677,13 +715,7 @@ class AutoClicker:
         self.pause_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.DISABLED)
         self._set_status("已停止")
-        # 如果最小化中，更新指示器为红色(已停止)
-        if self.root.state() == "iconic":
-            if self.floating_indicator and self.floating_indicator.winfo_exists():
-                self._update_indicator("stopped")
-            else:
-                self._show_indicator()
-                self._update_indicator("stopped")
+        self.tray.update_status("stopped")
 
     # --- 全局热键 (pynput) ---
 
@@ -769,12 +801,17 @@ class AutoClicker:
         self.hotkey_listener.start()
 
     def _on_close(self):
+        """关闭窗口按钮 → 隐藏到托盘而非退出"""
+        self._hide_window()
+
+    def _quit(self):
+        """完全退出程序"""
         self.stop_event.set()
         self.pause_event.set()
-        self._hide_indicator()
         self._save_config()
         if hasattr(self, "hotkey_listener"):
             self.hotkey_listener.stop()
+        self.tray.stop()
         self.root.destroy()
 
     def run(self):

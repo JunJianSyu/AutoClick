@@ -18,7 +18,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install pyautogui pynput pyinstaller
+        run: pip install pyautogui pynput pystray Pillow pyinstaller
 
       - name: Build EXE
         run: pyinstaller --onefile --noconsole --name AutoClicker auto_clicker.py

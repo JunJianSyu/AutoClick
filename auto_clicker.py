@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import random
 import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, messagebox
 
 import pyautogui
 from PIL import Image, ImageDraw, ImageFont
@@ -15,14 +16,443 @@ import pystray
 
 pyautogui.FAILSAFE = False
 
-MOUSE_ACTIONS = ["左键单击", "左键双击", "右键单击", "中键单击"]
+MOUSE_ACTIONS = {
+    "左键单击": "left",
+    "左键双击": "left",
+    "右键单击": "right",
+    "中键单击": "middle",
+}
 
-# F1-F12 保留给热键使用，不允许设为动作键
-RESERVED_HOTKEY_NAMES = {f"f{i}" for i in range(1, 13)}
+MIN_INTERVAL = 0.01  # 秒，防止 CPU 打满
+MAX_INTERVAL = 3600.0
+
+DEFAULT_CONFIG = {
+    "hotkey_start": "F1",
+    "hotkey_stop": "F2",
+    "key_sequence": [],
+}
 
 
-def _create_tray_icon_image(color="#4CAF50"):
-    """创建托盘图标图片：彩色圆角方块 + 字母 A"""
+# ---------------------------------------------------------------------------
+# 路径 / 日志 / 配置
+# ---------------------------------------------------------------------------
+def _get_base_dir():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _get_config_path():
+    return os.path.join(_get_base_dir(), "auto_clicker_config.json")
+
+
+def _get_log_path():
+    return os.path.join(_get_base_dir(), "auto_clicker.log")
+
+
+def _setup_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=[
+            logging.FileHandler(_get_log_path(), encoding="utf-8"),
+        ],
+    )
+
+
+logger = logging.getLogger("auto_clicker")
+
+
+def _normalize_action(action):
+    """规范化单个 action，返回 (action_or_None, error_msg)"""
+    if not isinstance(action, dict):
+        return None, "action 不是对象"
+    t = action.get("type")
+    interval = action.get("interval", 1.0)
+    try:
+        interval = float(interval)
+    except (TypeError, ValueError):
+        return None, "interval 不是数字"
+    interval = max(MIN_INTERVAL, min(MAX_INTERVAL, interval))
+    action["interval"] = interval
+
+    # 通用：interval 随机抖动 (0-1)，表示上下浮动比例
+    jitter = action.get("jitter", 0)
+    try:
+        jitter = float(jitter)
+    except (TypeError, ValueError):
+        jitter = 0
+    action["jitter"] = max(0.0, min(1.0, jitter))
+
+    if t == "key":
+        value = action.get("value")
+        if not isinstance(value, str) or not value.strip():
+            return None, "key.value 为空"
+        duration = action.get("duration", 0)
+        try:
+            duration = float(duration)
+        except (TypeError, ValueError):
+            duration = 0
+        action["duration"] = max(0.0, duration)
+        return action, None
+
+    if t == "mouse":
+        value = action.get("value")
+        if value not in MOUSE_ACTIONS:
+            return None, f"未知鼠标操作: {value}"
+        if action.get("use_pos"):
+            try:
+                action["x"] = int(action.get("x", 0))
+                action["y"] = int(action.get("y", 0))
+            except (TypeError, ValueError):
+                return None, "坐标不是整数"
+            # 坐标抖动 (像素)
+            pj = action.get("position_jitter", 0)
+            try:
+                pj = int(pj)
+            except (TypeError, ValueError):
+                pj = 0
+            action["position_jitter"] = max(0, pj)
+        return action, None
+
+    return None, f"未知 type: {t}"
+
+
+def load_config():
+    path = _get_config_path()
+    if not os.path.exists(path):
+        save_config(DEFAULT_CONFIG)
+        logger.info("配置文件不存在，已创建默认配置: %s", path)
+        return DEFAULT_CONFIG.copy()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        logger.warning("配置文件读取失败(%s)，使用默认配置", e)
+        return DEFAULT_CONFIG.copy()
+
+    for key, val in DEFAULT_CONFIG.items():
+        if key not in config:
+            config[key] = val
+
+    # 规范化按键序列
+    raw_seq = config.get("key_sequence") or []
+    if not isinstance(raw_seq, list):
+        raw_seq = []
+    valid = []
+    for i, action in enumerate(raw_seq):
+        normalized, err = _normalize_action(dict(action) if isinstance(action, dict) else {})
+        if normalized:
+            valid.append(normalized)
+        else:
+            logger.warning("跳过无效 action[%d]: %s", i, err)
+    config["key_sequence"] = valid
+    return config
+
+
+def save_config(config):
+    try:
+        with open(_get_config_path(), "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+    except IOError as e:
+        logger.warning("配置保存失败: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# 单实例锁
+# ---------------------------------------------------------------------------
+_lock_file = None
+
+
+def _acquire_single_instance() -> bool:
+    """尝试获取单实例锁。返回 True 表示获取成功。"""
+    global _lock_file
+    lock_path = os.path.join(_get_base_dir(), ".auto_clicker.lock")
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            _lock_file = open(lock_path, "w")
+            try:
+                msvcrt.locking(_lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                return True
+            except OSError:
+                _lock_file.close()
+                _lock_file = None
+                return False
+        else:
+            import fcntl
+            _lock_file = open(lock_path, "w")
+            try:
+                fcntl.flock(_lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
+            except OSError:
+                _lock_file.close()
+                _lock_file = None
+                return False
+    except Exception as e:
+        logger.warning("单实例锁失败(%s)，跳过检测", e)
+        return True
+
+
+# ---------------------------------------------------------------------------
+# 应用状态与工作线程
+# ---------------------------------------------------------------------------
+class AppState:
+    """封装运行时状态，避免全局变量散落"""
+
+    STATES = {
+        "ready":   ("#9E9E9E", "就绪"),
+        "running": ("#4CAF50", "运行中"),
+        "paused":  ("#FF9800", "已暂停"),
+        "stopped": ("#F44336", "已停止"),
+        "empty":   ("#9E9E9E", "无配置"),
+        "error":   ("#F44336", "配置错误"),
+    }
+
+    def __init__(self):
+        self.running = False
+        self.paused = False
+        self.stop_event = threading.Event()
+        self.pause_event = threading.Event()
+        self.pause_event.set()
+        self.workers: list[threading.Thread] = []
+        self.generation = 0  # 每次 start 递增，避免旧线程混入
+        self.lock = threading.Lock()
+
+        # UI 引用（在 build_ui 后填充）
+        self.root: tk.Tk | None = None
+        self.dot: tk.Label | None = None
+        self.status_var: tk.StringVar | None = None
+        self.tray_icon = None
+
+        # 配置引用
+        self.config = {}
+        self.key_sequence: list = []
+        self.hotkey_listener = None
+
+    def set_state(self, state: str):
+        if not self.root:
+            return
+        color, text = self.STATES.get(state, self.STATES["ready"])
+        try:
+            self.root.after(0, lambda: self._apply_state_ui(color, text))
+        except tk.TclError:
+            pass
+
+    def _apply_state_ui(self, color, text):
+        if self.dot and self.status_var:
+            try:
+                self.dot.config(fg=color)
+                self.status_var.set(text)
+            except tk.TclError:
+                pass
+
+
+state = AppState()
+
+
+def _interruptible_sleep(duration):
+    """可被 stop_event 打断的 sleep"""
+    if duration <= 0:
+        return
+    end_time = time.monotonic() + duration
+    while True:
+        remaining = end_time - time.monotonic()
+        if remaining <= 0:
+            return
+        if state.stop_event.is_set():
+            return
+        state.pause_event.wait()
+        time.sleep(min(0.05, remaining))
+
+
+def _simulate_key(key_name, duration=0):
+    name = key_name.lower()
+    if duration > 0:
+        pyautogui.keyDown(name)
+        time.sleep(duration)
+        pyautogui.keyUp(name)
+    else:
+        pyautogui.press(name)
+
+
+def _simulate_click(action):
+    value = action["value"]
+    x, y = None, None
+    if action.get("use_pos"):
+        x, y = action.get("x"), action.get("y")
+        pj = action.get("position_jitter", 0)
+        if pj > 0 and x is not None and y is not None:
+            x += random.randint(-pj, pj)
+            y += random.randint(-pj, pj)
+    button = MOUSE_ACTIONS.get(value, "left")
+    if value == "左键双击":
+        pyautogui.doubleClick(x=x, y=y, button=button)
+    else:
+        pyautogui.click(x=x, y=y, button=button)
+
+
+def _action_worker(action, my_generation):
+    """单个 action 的循环执行线程"""
+    base_interval = action.get("interval", 1.0)
+    jitter = action.get("jitter", 0)
+    while not state.stop_event.is_set() and my_generation == state.generation:
+        state.pause_event.wait()
+        if state.stop_event.is_set() or my_generation != state.generation:
+            break
+        start_time = time.monotonic()
+        try:
+            t = action["type"]
+            if t == "key":
+                _simulate_key(action["value"], action.get("duration", 0))
+            elif t == "mouse":
+                _simulate_click(action)
+        except Exception as e:
+            logger.warning("执行 action 失败 [%s=%s]: %s",
+                           action.get("type"), action.get("value"), e)
+            # 继续下一轮而非退出，除非是致命错误
+        # 计算本轮 interval（可选随机抖动）
+        interval = base_interval
+        if jitter > 0:
+            interval *= (1 + random.uniform(-jitter, jitter))
+        interval = max(MIN_INTERVAL, interval)
+        elapsed = time.monotonic() - start_time
+        remaining = max(0, interval - elapsed)
+        _interruptible_sleep(remaining)
+
+
+def do_start():
+    with state.lock:
+        if not state.key_sequence:
+            logger.info("按键序列为空，无法启动")
+            state.set_state("empty")
+            return
+
+        if state.running and not state.paused:
+            return  # 已经在跑
+
+        if state.paused:
+            # 恢复
+            state.paused = False
+            state.pause_event.set()
+            state.set_state("running")
+            return
+
+        # 首次启动，先确保上一轮线程已退出
+        state.generation += 1
+        my_gen = state.generation
+        state.stop_event.clear()
+        state.pause_event.set()
+        state.running = True
+        state.paused = False
+        state.set_state("running")
+
+        state.workers = []
+        for action in state.key_sequence:
+            t = threading.Thread(
+                target=_action_worker, args=(action, my_gen), daemon=True
+            )
+            t.start()
+            state.workers.append(t)
+        logger.info("已启动 %d 个 worker", len(state.workers))
+
+
+def do_pause():
+    with state.lock:
+        if not state.running or state.paused:
+            return
+        state.paused = True
+        state.pause_event.clear()
+        state.set_state("paused")
+
+
+def do_stop():
+    with state.lock:
+        if not state.running and not state.paused:
+            return
+        state.stop_event.set()
+        state.pause_event.set()  # 唤醒暂停中的线程让它退出
+        state.running = False
+        state.paused = False
+        state.set_state("stopped")
+
+
+# ---------------------------------------------------------------------------
+# 热键
+# ---------------------------------------------------------------------------
+def _parse_hotkey(name):
+    if not isinstance(name, str):
+        return None
+    name = name.strip().upper()
+    if name.startswith("F"):
+        try:
+            n = int(name[1:])
+            if 1 <= n <= 24:
+                return getattr(keyboard.Key, f"f{n}")
+        except (ValueError, AttributeError):
+            return None
+    if len(name) == 1:
+        return keyboard.KeyCode.from_char(name.lower())
+    return None
+
+
+def _start_hotkey_listener():
+    start_key = _parse_hotkey(state.config.get("hotkey_start", "F1"))
+    stop_key = _parse_hotkey(state.config.get("hotkey_stop", "F2"))
+
+    if not start_key:
+        logger.warning("hotkey_start 无效")
+    if not stop_key:
+        logger.warning("hotkey_stop 无效")
+
+    def on_press(key):
+        try:
+            if start_key and key == start_key:
+                if state.running and not state.paused:
+                    state.root.after(0, do_pause)
+                else:
+                    state.root.after(0, do_start)
+            elif stop_key and key == stop_key:
+                state.root.after(0, do_stop)
+        except Exception as e:
+            logger.warning("热键处理异常: %s", e)
+
+    listener = keyboard.Listener(on_press=on_press)
+    listener.daemon = True
+    listener.start()
+    state.hotkey_listener = listener
+
+
+# ---------------------------------------------------------------------------
+# 浮动指示器
+# ---------------------------------------------------------------------------
+def _build_indicator(root: tk.Tk):
+    indicator = tk.Toplevel(root)
+    indicator.overrideredirect(True)
+    indicator.attributes("-topmost", True)
+    indicator.geometry("+10+10")
+
+    frame = tk.Frame(indicator, bg="#2b2b2b",
+                     highlightbackground="#555555", highlightthickness=1)
+    frame.pack(fill=tk.BOTH, expand=True)
+
+    dot = tk.Label(frame, text="\u25cf", fg="#9E9E9E",
+                   bg="#2b2b2b", font=("", 10))
+    dot.pack(side=tk.LEFT, padx=(6, 2))
+
+    status_var = tk.StringVar(value="就绪")
+    label = tk.Label(frame, textvariable=status_var,
+                     fg="#ffffff", bg="#2b2b2b",
+                     font=("", 10, "bold"))
+    label.pack(side=tk.LEFT, padx=(0, 6), pady=3)
+
+    return dot, status_var
+
+
+# ---------------------------------------------------------------------------
+# 托盘图标
+# ---------------------------------------------------------------------------
+def _create_icon_image(color="#4CAF50"):
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     draw.rounded_rectangle([4, 4, 59, 59], radius=12, fill=color)
@@ -38,788 +468,100 @@ def _create_tray_icon_image(color="#4CAF50"):
     return img
 
 
-class _TrayManager:
-    """系统托盘管理器"""
-
-    STATUS_COLORS = {
-        "running": "#4CAF50",
-        "paused": "#FF9800",
-        "stopped": "#9E9E9E",
-        "ready": "#4CAF50",
-    }
-    STATUS_TITLES = {
-        "running": "AutoClicker - 运行中",
-        "paused": "AutoClicker - 已暂停",
-        "stopped": "AutoClicker - 已停止",
-        "ready": "AutoClicker",
-    }
-
-    def __init__(self, app: AutoClicker):
-        self._app = app
-        self._icon = pystray.Icon(
-            "auto_clicker",
-            icon=_create_tray_icon_image(),
-            title="AutoClicker",
-            menu=pystray.Menu(
-                pystray.MenuItem("显示窗口", self._on_show, default=True),
-                pystray.Menu.SEPARATOR,
-                pystray.MenuItem("清空配置", self._on_clear),
-                pystray.Menu.SEPARATOR,
-                pystray.MenuItem("退出", self._on_quit),
-            ),
-        )
-
-    def _on_show(self, icon=None, item=None):
-        """显示主窗口"""
-        self._app.root.after(0, self._app._show_window)
-
-    def _on_quit(self, icon=None, item=None):
-        """完全退出程序"""
-        self._icon.stop()
-        self._app.root.after(0, self._app._quit)
-
-    def _on_clear(self, icon=None, item=None):
-        """清空配置"""
-        self._app.root.after(0, self._app._clear_config)
-
-    def start(self):
-        """在后台线程启动托盘图标"""
-        thread = threading.Thread(target=self._icon.run, daemon=True)
-        thread.start()
-
-    def update_status(self, status: str):
-        """更新托盘图标颜色和悬停提示"""
-        color = self.STATUS_COLORS.get(status, "#4CAF50")
-        title = self.STATUS_TITLES.get(status, "AutoClicker")
+def _reload_config(icon=None, item=None):
+    """重新加载配置文件"""
+    def _do():
         try:
-            self._icon.icon = _create_tray_icon_image(color)
-            self._icon.title = title
-        except Exception:
-            pass
-
-    def stop(self):
-        """停止托盘图标"""
-        self._icon.stop()
-
-
-class AutoClicker:
-    def __init__(self):
-        self.running = False
-        self.paused = False
-        self.worker_thread = None
-        self.stop_event = threading.Event()
-        self.pause_event = threading.Event()
-        self.pause_event.set()
-
-        self.key_sequence = []
-
-        self._build_ui()
-        self._load_config()
-        self._refresh_list()
-        self._start_hotkey_listener()
-
-        self.tray = _TrayManager(self)
-        self.tray.start()
-
-        # 启动后自动最小化到托盘
-        self.root.withdraw()
-
-    def _build_ui(self):
-        self.root = tk.Tk()
-        self.hotkey_start_var = tk.StringVar(value="F9")
-        self.hotkey_stop_var = tk.StringVar(value="F10")
-        self.root.title("自动按键/鼠标点击工具")
-        self.root.geometry("420x480")
-        self.root.resizable(False, False)
-        self.root.attributes("-topmost", True)
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.root.bind("<Unmap>", self._on_window_unmap)
-        self.root.bind("<Map>", self._on_window_map)
-
-        main = ttk.Frame(self.root, padding=10)
-        main.pack(fill=tk.BOTH, expand=True)
-
-        # --- 按键序列列表 ---
-        seq_frame = ttk.LabelFrame(main, text="按键序列 (每个按键独立循环)", padding=5)
-        seq_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
-
-        list_inner = ttk.Frame(seq_frame)
-        list_inner.pack(fill=tk.BOTH, expand=True)
-
-        scrollbar = ttk.Scrollbar(list_inner)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        self.seq_listbox = tk.Listbox(list_inner, height=8, yscrollcommand=scrollbar.set,
-                                      font=("", 9))
-        self.seq_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.config(command=self.seq_listbox.yview)
-
-        seq_btn_frame = ttk.Frame(seq_frame)
-        seq_btn_frame.pack(fill=tk.X, pady=(5, 0))
-
-        self.add_key_btn = ttk.Button(
-            seq_btn_frame, text="添加按键", command=self._add_key)
-        self.add_key_btn.pack(side=tk.LEFT, expand=True,
-                              fill=tk.X, padx=(0, 2))
-        self.add_mouse_btn = ttk.Button(
-            seq_btn_frame, text="添加鼠标", command=self._add_mouse)
-        self.add_mouse_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        self.edit_btn = ttk.Button(
-            seq_btn_frame, text="编辑选中", command=self._edit_selected)
-        self.edit_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        ttk.Button(seq_btn_frame, text="删除选中", command=self._remove_selected).pack(
-            side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
-
-        move_frame = ttk.Frame(seq_frame)
-        move_frame.pack(fill=tk.X, pady=(3, 0))
-        ttk.Button(move_frame, text="上移", command=self._move_up).pack(
-            side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
-        ttk.Button(move_frame, text="下移", command=self._move_down).pack(
-            side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
-
-        # --- 控制按钮 ---
-        btn_frame = ttk.Frame(main)
-        btn_frame.pack(fill=tk.X, pady=(0, 5))
-
-        self.start_btn = ttk.Button(btn_frame, text="开始", command=self._start)
-        self.start_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
-
-        self.pause_btn = ttk.Button(btn_frame, text="暂停", command=self._pause,
-                                    state=tk.DISABLED)
-        self.pause_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-
-        self.stop_btn = ttk.Button(btn_frame, text="停止", command=self._stop,
-                                   state=tk.DISABLED)
-        self.stop_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
-
-        ttk.Button(main, text="清空配置", command=self._clear_config).pack(
-            fill=tk.X, pady=(0, 5))
-
-        # --- 状态 ---
-        status_frame = ttk.LabelFrame(main, text="状态", padding=5)
-        status_frame.pack(fill=tk.X, pady=(0, 5))
-
-        self.status_var = tk.StringVar(value="就绪 - 请添加按键序列")
-        tk.Label(status_frame, textvariable=self.status_var,
-                 font=("", 10, "bold")).pack()
-
-        # --- 热键设置 ---
-        hotkey_frame = ttk.LabelFrame(main, text="热键设置 (F1-F12 保留给热键)", padding=5)
-        hotkey_frame.pack(fill=tk.X)
-
-        row1 = ttk.Frame(hotkey_frame)
-        row1.pack(fill=tk.X, pady=2)
-        ttk.Label(row1, text="开始/暂停:").pack(side=tk.LEFT)
-        self.start_hk_label = tk.Label(row1, textvariable=self.hotkey_start_var,
-                                        fg="green", font=("", 9, "bold"), width=8)
-        self.start_hk_label.pack(side=tk.LEFT, padx=(5, 5))
-        ttk.Button(row1, text="修改", width=5,
-                   command=lambda: self._capture_hotkey("start")).pack(side=tk.LEFT)
-
-        row2 = ttk.Frame(hotkey_frame)
-        row2.pack(fill=tk.X, pady=2)
-        ttk.Label(row2, text="停止:").pack(side=tk.LEFT)
-        self.stop_hk_label = tk.Label(row2, textvariable=self.hotkey_stop_var,
-                                       fg="red", font=("", 9, "bold"), width=8)
-        self.stop_hk_label.pack(side=tk.LEFT, padx=(5, 5))
-        ttk.Button(row2, text="修改", width=5,
-                   command=lambda: self._capture_hotkey("stop")).pack(side=tk.LEFT)
-
-    def _add_key(self):
-        dialog = tk.Toplevel(self.root)
-        dialog.title("添加按键")
-        dialog.geometry("280x200")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.attributes("-topmost", True)
-
-        ttk.Label(dialog, text="输入按键 (F1-F12 不可用):").pack(pady=(10, 0))
-        key_var = tk.StringVar(value="space")
-        ttk.Entry(dialog, textvariable=key_var, width=18).pack(pady=5)
-
-        ttk.Label(dialog, text="按下持续时间(秒, 0为瞬按):").pack()
-        dur_var = tk.DoubleVar(value=0.0)
-        ttk.Spinbox(dialog, from_=0.0, to=10.0, increment=0.1,
-                    textvariable=dur_var, width=8, format="%.2f").pack(pady=2)
-
-        ttk.Label(dialog, text="执行间隔(秒):").pack()
-        interval_var = tk.DoubleVar(value=1.0)
-        ttk.Spinbox(dialog, from_=0.01, to=60.0, increment=0.1,
-                    textvariable=interval_var, width=8, format="%.2f").pack(pady=2)
-
-        def confirm():
-            key_name = key_var.get().strip()
-            if not key_name:
-                messagebox.showwarning("提示", "请输入按键名称", parent=dialog)
-                return
-            if key_name.lower() in RESERVED_HOTKEY_NAMES:
-                messagebox.showwarning("提示",
-                                        "F1-F12 保留给热键使用，不可作为动作按键",
-                                        parent=dialog)
-                return
-            self.key_sequence.append({
-                "type": "key",
-                "value": key_name,
-                "duration": dur_var.get(),
-                "interval": interval_var.get(),
-            })
-            self._refresh_list()
-            dialog.destroy()
-
-        ttk.Button(dialog, text="确定", command=confirm).pack(pady=8)
-
-    def _add_mouse(self):
-        dialog = tk.Toplevel(self.root)
-        dialog.title("添加鼠标点击")
-        dialog.geometry("300x270")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.attributes("-topmost", True)
-
-        ttk.Label(dialog, text="鼠标操作:").pack(pady=(10, 0))
-        mouse_var = tk.StringVar(value="左键单击")
-        ttk.Combobox(dialog, textvariable=mouse_var, values=MOUSE_ACTIONS,
-                     state="readonly", width=15).pack(pady=5)
-
-        pos_frame = ttk.Frame(dialog)
-        pos_frame.pack(pady=5)
-
-        use_pos = tk.BooleanVar(value=False)
-        ttk.Checkbutton(pos_frame, text="指定坐标",
-                        variable=use_pos).pack(anchor=tk.W)
-
-        coord_frame = ttk.Frame(pos_frame)
-        coord_frame.pack(anchor=tk.W, padx=(20, 0))
-        ttk.Label(coord_frame, text="X:").pack(side=tk.LEFT)
-        x_var = tk.IntVar(value=0)
-        ttk.Spinbox(coord_frame, from_=0, to=9999, textvariable=x_var, width=6).pack(
-            side=tk.LEFT, padx=(2, 10))
-        ttk.Label(coord_frame, text="Y:").pack(side=tk.LEFT)
-        y_var = tk.IntVar(value=0)
-        ttk.Spinbox(coord_frame, from_=0, to=9999, textvariable=y_var, width=6).pack(
-            side=tk.LEFT, padx=2)
-
-        def pick_pos():
-            dialog.withdraw()
-            self.root.after(1500, lambda: _capture_pos())
-
-        def _capture_pos():
-            x, y = pyautogui.position()
-            x_var.set(x)
-            y_var.set(y)
-            use_pos.set(True)
-            dialog.deiconify()
-
-        ttk.Button(pos_frame, text="1.5秒后捕获鼠标位置", command=pick_pos).pack(
-            anchor=tk.W, padx=(20, 0), pady=(3, 0))
-
-        ttk.Label(dialog, text="执行间隔(秒):").pack()
-        interval_var = tk.DoubleVar(value=1.0)
-        ttk.Spinbox(dialog, from_=0.01, to=60.0, increment=0.1,
-                    textvariable=interval_var, width=8, format="%.2f").pack(pady=2)
-
-        def confirm():
-            self.key_sequence.append({
-                "type": "mouse",
-                "value": mouse_var.get(),
-                "use_pos": use_pos.get(),
-                "x": x_var.get(),
-                "y": y_var.get(),
-                "interval": interval_var.get(),
-            })
-            self._refresh_list()
-            dialog.destroy()
-
-        ttk.Button(dialog, text="确定", command=confirm).pack(pady=8)
-
-    def _edit_selected(self):
-        selected = self.seq_listbox.curselection()
-        if not selected:
-            messagebox.showinfo("提示", "请先选中要编辑的条目")
-            return
-        idx = selected[0]
-        action = self.key_sequence[idx]
-        if action["type"] == "key":
-            self._edit_key(idx, action)
-        elif action["type"] == "mouse":
-            self._edit_mouse(idx, action)
-
-    def _edit_key(self, idx, action):
-        dialog = tk.Toplevel(self.root)
-        dialog.title("编辑按键")
-        dialog.geometry("280x200")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.attributes("-topmost", True)
-
-        ttk.Label(dialog, text="输入按键 (F1-F12 不可用):").pack(pady=(10, 0))
-        key_var = tk.StringVar(value=action["value"])
-        ttk.Entry(dialog, textvariable=key_var, width=18).pack(pady=5)
-
-        ttk.Label(dialog, text="按下持续时间(秒, 0为瞬按):").pack()
-        dur_var = tk.DoubleVar(value=action.get("duration", 0))
-        ttk.Spinbox(dialog, from_=0.0, to=10.0, increment=0.1,
-                    textvariable=dur_var, width=8, format="%.2f").pack(pady=2)
-
-        ttk.Label(dialog, text="执行间隔(秒):").pack()
-        interval_var = tk.DoubleVar(value=action.get("interval", 1.0))
-        ttk.Spinbox(dialog, from_=0.01, to=60.0, increment=0.1,
-                    textvariable=interval_var, width=8, format="%.2f").pack(pady=2)
-
-        def confirm():
-            key_name = key_var.get().strip()
-            if not key_name:
-                messagebox.showwarning("提示", "请输入按键名称", parent=dialog)
-                return
-            if key_name.lower() in RESERVED_HOTKEY_NAMES:
-                messagebox.showwarning("提示",
-                                        "F1-F12 保留给热键使用，不可作为动作按键",
-                                        parent=dialog)
-                return
-            self.key_sequence[idx] = {
-                "type": "key",
-                "value": key_name,
-                "duration": dur_var.get(),
-                "interval": interval_var.get(),
-            }
-            self._refresh_list()
-            self.seq_listbox.selection_set(idx)
-            dialog.destroy()
-
-        ttk.Button(dialog, text="确定", command=confirm).pack(pady=8)
-
-    def _edit_mouse(self, idx, action):
-        dialog = tk.Toplevel(self.root)
-        dialog.title("编辑鼠标点击")
-        dialog.geometry("300x270")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.attributes("-topmost", True)
-
-        ttk.Label(dialog, text="鼠标操作:").pack(pady=(10, 0))
-        mouse_var = tk.StringVar(value=action["value"])
-        ttk.Combobox(dialog, textvariable=mouse_var, values=MOUSE_ACTIONS,
-                     state="readonly", width=15).pack(pady=5)
-
-        pos_frame = ttk.Frame(dialog)
-        pos_frame.pack(pady=5)
-
-        use_pos = tk.BooleanVar(value=action.get("use_pos", False))
-        ttk.Checkbutton(pos_frame, text="指定坐标",
-                        variable=use_pos).pack(anchor=tk.W)
-
-        coord_frame = ttk.Frame(pos_frame)
-        coord_frame.pack(anchor=tk.W, padx=(20, 0))
-        ttk.Label(coord_frame, text="X:").pack(side=tk.LEFT)
-        x_var = tk.IntVar(value=action.get("x", 0))
-        ttk.Spinbox(coord_frame, from_=0, to=9999, textvariable=x_var, width=6).pack(
-            side=tk.LEFT, padx=(2, 10))
-        ttk.Label(coord_frame, text="Y:").pack(side=tk.LEFT)
-        y_var = tk.IntVar(value=action.get("y", 0))
-        ttk.Spinbox(coord_frame, from_=0, to=9999, textvariable=y_var, width=6).pack(
-            side=tk.LEFT, padx=2)
-
-        def pick_pos():
-            dialog.withdraw()
-            self.root.after(1500, lambda: _capture_pos())
-
-        def _capture_pos():
-            x, y = pyautogui.position()
-            x_var.set(x)
-            y_var.set(y)
-            use_pos.set(True)
-            dialog.deiconify()
-
-        ttk.Button(pos_frame, text="1.5秒后捕获鼠标位置", command=pick_pos).pack(
-            anchor=tk.W, padx=(20, 0), pady=(3, 0))
-
-        ttk.Label(dialog, text="执行间隔(秒):").pack()
-        interval_var = tk.DoubleVar(value=action.get("interval", 1.0))
-        ttk.Spinbox(dialog, from_=0.01, to=60.0, increment=0.1,
-                    textvariable=interval_var, width=8, format="%.2f").pack(pady=2)
-
-        def confirm():
-            self.key_sequence[idx] = {
-                "type": "mouse",
-                "value": mouse_var.get(),
-                "use_pos": use_pos.get(),
-                "x": x_var.get(),
-                "y": y_var.get(),
-                "interval": interval_var.get(),
-            }
-            self._refresh_list()
-            self.seq_listbox.selection_set(idx)
-            dialog.destroy()
-
-        ttk.Button(dialog, text="确定", command=confirm).pack(pady=8)
-
-    def _remove_selected(self):
-        selected = self.seq_listbox.curselection()
-        if not selected:
-            return
-        for idx in reversed(selected):
-            self.key_sequence.pop(idx)
-        self._refresh_list()
-
-    def _move_up(self):
-        selected = self.seq_listbox.curselection()
-        if not selected or selected[0] == 0:
-            return
-        idx = selected[0]
-        self.key_sequence[idx - 1], self.key_sequence[idx] = \
-            self.key_sequence[idx], self.key_sequence[idx - 1]
-        self._refresh_list()
-        self.seq_listbox.selection_set(idx - 1)
-
-    def _move_down(self):
-        selected = self.seq_listbox.curselection()
-        if not selected or selected[0] >= len(self.key_sequence) - 1:
-            return
-        idx = selected[0]
-        self.key_sequence[idx + 1], self.key_sequence[idx] = \
-            self.key_sequence[idx], self.key_sequence[idx + 1]
-        self._refresh_list()
-        self.seq_listbox.selection_set(idx + 1)
-
-    def _refresh_list(self):
-        self.seq_listbox.delete(0, tk.END)
-        for i, action in enumerate(self.key_sequence, 1):
-            t = action["type"]
-            interval = action.get("interval", 1.0)
-            if t == "key":
-                dur = action.get("duration", 0)
-                dur_str = f" 持续{dur}秒" if dur > 0 else ""
-                self.seq_listbox.insert(tk.END,
-                                        f"{i}. 按键: {action['value']}{dur_str} | 间隔{interval}秒")
-            elif t == "mouse":
-                pos_str = ""
-                if action.get("use_pos"):
-                    pos_str = f" @({action['x']},{action['y']})"
-                self.seq_listbox.insert(tk.END,
-                                        f"{i}. 鼠标: {action['value']}{pos_str} | 间隔{interval}秒")
-        self._update_add_buttons()
-        self._save_config()
-
-    def _update_add_buttons(self):
-        state = tk.NORMAL if len(self.key_sequence) < 10 else tk.DISABLED
-        self.add_key_btn.config(state=state)
-        self.add_mouse_btn.config(state=state)
-
-    # --- 配置持久化 ---
-
-    @staticmethod
-    def _get_config_path():
-        """获取配置文件路径（与 exe/脚本同目录）"""
-        if getattr(sys, 'frozen', False):
-            base_dir = os.path.dirname(sys.executable)
-        else:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-        return os.path.join(base_dir, "auto_clicker_config.json")
-
-    def _load_config(self):
-        """从配置文件加载设置"""
-        config_path = self._get_config_path()
-        if not os.path.exists(config_path):
-            return
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                config = json.load(f)
-        except (json.JSONDecodeError, IOError):
-            return
-
-        # 恢复按键序列
-        if "key_sequence" in config:
-            self.key_sequence = config["key_sequence"]
-
-        # 恢复热键设置
-        if "hotkey_start" in config:
-            self.hotkey_start_var.set(config["hotkey_start"])
-        if "hotkey_stop" in config:
-            self.hotkey_stop_var.set(config["hotkey_stop"])
-
-    def _save_config(self):
-        """将当前设置保存到配置文件"""
-        config = {
-            "key_sequence": self.key_sequence,
-            "hotkey_start": self.hotkey_start_var.get(),
-            "hotkey_stop": self.hotkey_stop_var.get(),
-        }
-        try:
-            config_path = self._get_config_path()
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(config, f, ensure_ascii=False, indent=2)
-        except IOError:
-            pass
-
-    def _clear_config(self):
-        """清空所有配置，恢复默认设置"""
-        if self.running:
-            messagebox.showwarning("提示", "请先停止运行再清空配置")
-            return
-        if not messagebox.askyesno("确认", "确定清空所有按键和热键配置？\n将恢复默认值(F9/F10)"):
-            return
-        self.key_sequence = []
-        self.hotkey_start_var.set("F9")
-        self.hotkey_stop_var.set("F10")
-        self._refresh_list()
-        self._restart_hotkey_listener()
-        self._set_status("配置已清空")
-
-    def _simulate_key(self, key_name, duration=0):
-        name = key_name.lower()
-        if duration > 0:
-            pyautogui.keyDown(name)
-            time.sleep(duration)
-            pyautogui.keyUp(name)
-        else:
-            pyautogui.press(name)
-
-    def _simulate_click(self, action):
-        value = action["value"]
-        x, y = None, None
-        if action.get("use_pos"):
-            x, y = action["x"], action["y"]
-
-        if value == "左键单击":
-            pyautogui.click(x=x, y=y, button="left")
-        elif value == "左键双击":
-            pyautogui.doubleClick(x=x, y=y, button="left")
-        elif value == "右键单击":
-            pyautogui.click(x=x, y=y, button="right")
-        elif value == "中键单击":
-            pyautogui.click(x=x, y=y, button="middle")
-
-    def _worker(self):
-        if not self.key_sequence:
-            self.root.after(0, lambda: self._set_status("错误: 按键序列为空"))
-            return
-
-        threads = []
-        for action in self.key_sequence:
-            t = threading.Thread(target=self._action_worker,
-                                 args=(action,), daemon=True)
-            threads.append(t)
-            t.start()
-
-        for t in threads:
-            t.join()
-
-    def _action_worker(self, action):
-        interval = action.get("interval", 1.0)
-
-        while not self.stop_event.is_set():
-            self.pause_event.wait()
-            if self.stop_event.is_set():
-                break
-
-            start_time = time.monotonic()
-            try:
-                t = action["type"]
-                if t == "key":
-                    self._simulate_key(
-                        action["value"], action.get("duration", 0))
-                elif t == "mouse":
-                    self._simulate_click(action)
-            except Exception as e:
-                self.root.after(0, lambda err=str(
-                    e): self._set_status(f"错误: {err}"))
-                return
-
-            # 间隔 = 两次执行之间的总时间，扣除本次执行耗时
-            elapsed = time.monotonic() - start_time
-            remaining = max(0, interval - elapsed)
-            self._interruptible_sleep(remaining)
-
-    def _interruptible_sleep(self, duration):
-        elapsed = 0.0
-        step = 0.05
-        while elapsed < duration:
-            if self.stop_event.is_set():
-                return
-            self.pause_event.wait()
-            time.sleep(min(step, duration - elapsed))
-            elapsed += step
-
-    def _set_status(self, text):
-        self.status_var.set(text)
-
-    # --- 窗口显示/隐藏（托盘） ---
-
-    def _on_window_unmap(self, event):
-        """主窗口最小化时触发"""
-        pass
-
-    def _on_window_map(self, event):
-        """主窗口恢复时触发"""
-        pass
-
-    def _show_window(self):
-        """从托盘恢复主窗口"""
-        self.root.deiconify()
-        self.root.lift()
-        self.root.focus_force()
-
-    def _hide_window(self):
-        """隐藏主窗口到托盘"""
-        self.root.withdraw()
-
-    def _start(self):
-        if not self.key_sequence:
-            messagebox.showwarning("提示", "请先添加按键序列")
-            return
-
-        if self.paused:
-            self.paused = False
-            self.pause_event.set()
-            self._set_status("运行中...")
-            self.start_btn.config(state=tk.DISABLED)
-            self.pause_btn.config(state=tk.NORMAL)
-            self.tray.update_status("running")
-            return
-
-        if self.running:
-            return
-
-        self.running = True
-        self.paused = False
-        self.stop_event.clear()
-        self.pause_event.set()
-
-        self.start_btn.config(state=tk.DISABLED)
-        self.pause_btn.config(state=tk.NORMAL)
-        self.stop_btn.config(state=tk.NORMAL)
-        self._set_status("运行中...")
-
-        self.worker_thread = threading.Thread(target=self._worker, daemon=True)
-        self.worker_thread.start()
-
-        self.tray.update_status("running")
-
-    def _pause(self):
-        if not self.running or self.paused:
-            return
-        self.paused = True
-        self.pause_event.clear()
-        self._set_status("已暂停")
-        self.start_btn.config(state=tk.NORMAL)
-        self.pause_btn.config(state=tk.DISABLED)
-        self.tray.update_status("paused")
-
-    def _stop(self):
-        if not self.running:
-            return
-        self.stop_event.set()
-        self.pause_event.set()
-        self.running = False
-        self.paused = False
-
-        self.start_btn.config(state=tk.NORMAL)
-        self.pause_btn.config(state=tk.DISABLED)
-        self.stop_btn.config(state=tk.DISABLED)
-        self._set_status("已停止")
-        self.tray.update_status("stopped")
-
-    # --- 全局热键 (pynput) ---
-
-    @staticmethod
-    def _parse_hotkey(name):
-        """将热键名解析为 pynput Key 对象"""
-        name = name.strip().upper()
-        if name.startswith("F"):
-            try:
-                n = int(name[1:])
-                return getattr(keyboard.Key, f"f{n}")
-            except (ValueError, AttributeError):
-                return None
-        if len(name) == 1:
-            return keyboard.KeyCode.from_char(name.lower())
-        return None
-
-    def _capture_hotkey(self, which):
-        """弹出对话框捕获新热键"""
-        dialog = tk.Toplevel(self.root)
-        dialog.title("设置热键")
-        dialog.geometry("260x120")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.attributes("-topmost", True)
-
-        tk.Label(dialog, text="请按下要设置的热键\n(支持 F1-F24 或单个字符键)",
-                 font=("", 10)).pack(pady=10)
-        result_var = tk.StringVar(value="等待按键...")
-        tk.Label(dialog, textvariable=result_var,
-                 font=("", 12, "bold"), fg="blue").pack()
-
-        captured = [None]
-
-        def on_key_press(key):
-            if hasattr(key, 'name'):
-                key_name = key.name.upper()
-                if key_name in (f"F{i}" for i in range(1, 25)):
-                    captured[0] = key_name
-                    dialog.after(0, lambda: result_var.set(key_name))
-                    dialog.after(300, dialog.destroy)
-                    return
-            if hasattr(key, 'char') and key.char:
-                captured[0] = key.char.upper()
-                dialog.after(0, lambda: result_var.set(key.char.upper()))
-                dialog.after(300, dialog.destroy)
-
-        temp_listener = keyboard.Listener(on_press=on_key_press)
-        temp_listener.start()
-
-        dialog.wait_window()
-        temp_listener.stop()
-
-        if captured[0]:
-            if which == "start":
-                self.hotkey_start_var.set(captured[0])
+            state.config = load_config()
+            state.key_sequence = state.config.get("key_sequence", [])
+            # 停止当前运行的任务（配置变了）
+            do_stop()
+            # 重启热键监听（热键可能变了）
+            if state.hotkey_listener:
+                state.hotkey_listener.stop()
+            _start_hotkey_listener()
+            if not state.key_sequence:
+                state.set_state("empty")
             else:
-                self.hotkey_stop_var.set(captured[0])
-            self._restart_hotkey_listener()
-            self._save_config()
+                state.set_state("ready")
+            logger.info("配置已重新加载，共 %d 个 action", len(state.key_sequence))
+        except Exception as e:
+            logger.error("重新加载配置失败: %s", e)
+            state.set_state("error")
+    if state.root:
+        state.root.after(0, _do)
 
-    def _restart_hotkey_listener(self):
-        """重启热键监听器以应用新的热键配置"""
-        if hasattr(self, "hotkey_listener"):
-            self.hotkey_listener.stop()
-        self._start_hotkey_listener()
 
-    def _start_hotkey_listener(self):
-        start_key = self._parse_hotkey(self.hotkey_start_var.get())
-        stop_key = self._parse_hotkey(self.hotkey_stop_var.get())
+def _quit_app(icon=None, item=None):
+    do_stop()
+    try:
+        if state.hotkey_listener:
+            state.hotkey_listener.stop()
+    except Exception:
+        pass
+    if state.tray_icon:
+        state.tray_icon.stop()
+    if state.root:
+        state.root.after(0, state.root.destroy)
 
-        def on_press(key):
-            if start_key and key == start_key:
-                if self.running and not self.paused:
-                    self.root.after(0, self._pause)
-                else:
-                    self.root.after(0, self._start)
-            elif stop_key and key == stop_key:
-                self.root.after(0, self._stop)
 
-        self.hotkey_listener = keyboard.Listener(on_press=on_press)
-        self.hotkey_listener.daemon = True
-        self.hotkey_listener.start()
+def _start_tray():
+    icon = pystray.Icon(
+        "auto_clicker",
+        icon=_create_icon_image(),
+        title="AutoClicker",
+        menu=pystray.Menu(
+            pystray.MenuItem("重新加载配置", _reload_config),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("退出", _quit_app),
+        ),
+    )
+    state.tray_icon = icon
+    thread = threading.Thread(target=icon.run, daemon=True)
+    thread.start()
 
-    def _on_close(self):
-        """关闭窗口按钮 → 隐藏到托盘而非退出"""
-        self._hide_window()
 
-    def _quit(self):
-        """完全退出程序"""
-        self.stop_event.set()
-        self.pause_event.set()
-        self._save_config()
-        if hasattr(self, "hotkey_listener"):
-            self.hotkey_listener.stop()
-        self.tray.stop()
-        self.root.destroy()
+# ---------------------------------------------------------------------------
+# 入口
+# ---------------------------------------------------------------------------
+def main():
+    _setup_logging()
+    logger.info("=== AutoClicker 启动 ===")
 
-    def run(self):
-        self.root.mainloop()
+    if not _acquire_single_instance():
+        logger.warning("已有实例在运行，退出")
+        sys.exit(0)
+
+    # 加载配置
+    state.config = load_config()
+    state.key_sequence = state.config.get("key_sequence", [])
+
+    # 构建 UI（tkinter 必须在主线程）
+    state.root = tk.Tk()
+    state.root.withdraw()
+    state.dot, state.status_var = _build_indicator(state.root)
+
+    # 启动热键监听
+    _start_hotkey_listener()
+
+    # 延迟启动托盘（等主循环起来）
+    state.root.after(200, _start_tray)
+
+    # 初始状态
+    if not state.key_sequence:
+        state.set_state("empty")
+        logger.info("配置为空，请编辑 %s 后从托盘'重新加载配置'", _get_config_path())
+    else:
+        state.set_state("ready")
+        logger.info("已加载 %d 个 action", len(state.key_sequence))
+
+    try:
+        state.root.mainloop()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        logger.info("=== AutoClicker 退出 ===")
 
 
 if __name__ == "__main__":
-    app = AutoClicker()
-    app.run()
+    main()

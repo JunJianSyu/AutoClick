@@ -18,10 +18,19 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install pyautogui pynput pystray Pillow pyinstaller
+        run: |
+          pip install --upgrade pip
+          pip install pyautogui pynput pystray Pillow pywin32 pyinstaller
 
       - name: Build EXE
-        run: pyinstaller --onefile --noconsole --icon=assets\icon.ico --name AutoClicker auto_clicker.py
+        run: |
+          pyinstaller --onefile --noconsole ^
+            --icon=assets\icon.ico ^
+            --name AutoClicker ^
+            --hidden-import=pystray._win32 ^
+            --hidden-import=PIL._tkinter_finder ^
+            auto_clicker.py
+        shell: cmd
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

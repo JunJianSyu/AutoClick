@@ -1,0 +1,23 @@
+{
+  "hotkey_start": "F1",
+  "hotkey_stop": "F2",
+  "key_sequence": [
+    {
+      "type": "key",
+      "value": "space",
+      "duration": 0,
+      "interval": 1.0,
+      "jitter": 0.2
+    },
+    {
+      "type": "mouse",
+      "value": "左键单击",
+      "use_pos": true,
+      "x": 500,
+      "y": 300,
+      "interval": 1.5,
+      "jitter": 0.3,
+      "position_jitter": 3
+    }
+  ]
+}
